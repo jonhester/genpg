@@ -1,0 +1,13 @@
+{
+  "schema": "schema.sql",
+  "queries": "queries/*.sql",
+  "out": "generated/queries.ts",
+  "overrides": {
+    "timestamptz": {
+      "type": "Temporal.Instant",
+      "import": "import { Temporal } from 'temporal-polyfill';",
+      "parse": "(value) => value.toTemporalInstant()",
+      "serialize": "(value) => value.toString()"
+    }
+  }
+}
