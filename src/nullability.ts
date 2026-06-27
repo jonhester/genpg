@@ -17,9 +17,17 @@ export function inferNonNullOutputColumns(sql: string): Set<number> {
   return out;
 }
 
+export interface ExpressionInferenceOptions {
+  isNonNullColumn?: (ref: ColumnRef) => boolean;
+  depth?: number;
+}
+
 /** True when a standalone SQL expression is visibly non-null. */
-export function inferNonNullExpression(expr: string): boolean {
-  return isNonNullExpression(expr);
+export function inferNonNullExpression(
+  expr: string,
+  options: ExpressionInferenceOptions = {},
+): boolean {
+  return isNonNullExpression(expr, options);
 }
 
 export interface ColumnRef {
@@ -47,6 +55,16 @@ export function simpleColumnRef(expr: string): ColumnRef | null {
   return { table: unquoteIdent(m[1]!), column: unquoteIdent(m[2]!) };
 }
 
+/** Best-effort extraction of `alias.column` refs used inside an expression. */
+export function columnRefsInExpression(expr: string): ColumnRef[] {
+  const refs: ColumnRef[] = [];
+  const re = /((?:"(?:[^"]|"")+"|[A-Za-z_]\w*)+)\.("(?:[^"]|"")+"|[A-Za-z_]\w*)/g;
+  for (const m of stripStringsAndComments(expr).matchAll(re)) {
+    refs.push({ table: unquoteIdent(m[1]!), column: unquoteIdent(m[2]!) });
+  }
+  return refs;
+}
+
 /**
  * Extract simple base relation aliases from a FROM/JOIN list. Nullable marks the
  * alias as coming from the optional side of an outer join.
@@ -57,11 +75,12 @@ export function fromAliases(sql: string): FromAlias[] {
 
   const out: FromAlias[] = [];
   const relationPattern =
-    /\b(from|(?:left|right|full|cross|inner)?\s*join|join)\s+((?:"(?:[^"]|"")+"|[A-Za-z_]\w*)(?:\.(?:"(?:[^"]|"")+"|[A-Za-z_]\w*))?)(?:\s+(?:as\s+)?("(?:[^"]|"")+"|[A-Za-z_]\w*))?/gi;
+    /\b(from|(?:left|right|full|cross|inner)?\s*join|join)\s+\(*\s*(?:only\s+)?((?:"(?:[^"]|"")+"|[A-Za-z_]\w*)(?:\.(?:"(?:[^"]|"")+"|[A-Za-z_]\w*))?)(?:\s+(?:as\s+)?(?!(?:left|right|full|cross|inner|join|where|on|group|order|limit)\b)("(?:[^"]|"")+"|[A-Za-z_]\w*))?/gi;
 
   for (const m of from.matchAll(relationPattern)) {
     const kind = m[1]!.replace(/\s+/g, " ").trim().toLowerCase();
     const relation = normalizeRelationName(m[2]!);
+    if (relation.toLowerCase() === "select") continue;
     const alias = m[3] ? unquoteIdent(m[3]) : relation.split(".").at(-1)!;
     const nullable = kind.startsWith("left") || kind.startsWith("full");
 
@@ -73,13 +92,46 @@ export function fromAliases(sql: string): FromAlias[] {
   return out;
 }
 
-function isNonNullExpression(expr: string): boolean {
+const STRICT_FUNCTIONS = new Set([
+  "date_trunc",
+  "lower",
+  "upper",
+  "trim",
+  "btrim",
+  "ltrim",
+  "rtrim",
+]);
+
+function isNonNullExpression(expr: string, options: ExpressionInferenceOptions): boolean {
+  const depth = options.depth ?? 0;
+  if (depth > 20 || expr.length > 2000) return false;
+  const nextOptions = { ...options, depth: depth + 1 };
   const castless = stripOuterCasts(stripOuterParens(expr.trim()));
   if (isNonNullLiteral(castless)) return true;
 
+  const ref = simpleColumnRef(castless);
+  if (ref && options.isNonNullColumn?.(ref) === true) return true;
+
   const args = callArgs(castless, "coalesce");
   if (args) {
-    return args.some((arg) => isNonNullExpression(arg));
+    return args.some((arg) => isNonNullExpression(arg, nextOptions));
+  }
+
+  const call = anyCall(castless);
+  if (call && STRICT_FUNCTIONS.has(call.name)) {
+    return call.args.length > 0 && call.args.every((arg) => isNonNullExpression(arg, nextOptions));
+  }
+
+  // CASE nullability depends on every branch and condition shape; stay conservative.
+  if (/\bcase\b/i.test(castless)) return false;
+
+  const binary = splitTopLevelBinary(castless);
+  if (binary) {
+    return (
+      ["+", "-", "*", "/", "%", "||"].includes(binary.op) &&
+      isNonNullExpression(binary.left, nextOptions) &&
+      isNonNullExpression(binary.right, nextOptions)
+    );
   }
 
   return false;
@@ -133,6 +185,37 @@ function callArgs(expr: string, name: string): string[] | null {
   while (/\s/.test(s[i] ?? "")) i++;
   if (s[i] !== "(" || matchingParen(s, i) !== s.length - 1) return null;
   return splitTopLevel(s.slice(i + 1, -1), ",");
+}
+
+function anyCall(expr: string): { name: string; args: string[] } | null {
+  const s = expr.trim();
+  const m = /^([A-Za-z_]\w*)/.exec(s);
+  if (!m) return null;
+  let i = m[1].length;
+  while (/\s/.test(s[i] ?? "")) i++;
+  if (s[i] !== "(" || matchingParen(s, i) !== s.length - 1) return null;
+  return { name: m[1].toLowerCase(), args: splitTopLevel(s.slice(i + 1, -1), ",") };
+}
+
+function splitTopLevelBinary(expr: string): { left: string; op: string; right: string } | null {
+  const ops = ["||", "+", "-", "*", "/", "%"];
+  const matches: { i: number; op: string }[] = [];
+  forEachTopLevelChar(expr, (i) => {
+    if (matches.length) return;
+    for (const op of ops) {
+      if (expr.slice(i, i + op.length) === op) {
+        // Avoid treating leading signs as binary operators.
+        if ((op === "+" || op === "-") && expr.slice(0, i).trim() === "") continue;
+        matches.push({ i, op });
+        return;
+      }
+    }
+  });
+  const found = matches[0];
+  if (!found) return null;
+  const left = expr.slice(0, found.i).trim();
+  const right = expr.slice(found.i + found.op.length).trim();
+  return left && right ? { left, op: found.op, right } : null;
 }
 
 function stripOuterParens(expr: string): string {
@@ -225,6 +308,60 @@ function splitTopLevelWhitespace(s: string): string[] {
   const last = s.slice(start).trim();
   if (last) parts.push(last);
   return parts;
+}
+
+function stripStringsAndComments(s: string): string {
+  let out = "";
+  let state: "normal" | "single" | "double" | "line" | "block" = "normal";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    const n = s[i + 1] ?? "";
+    if (state === "line") {
+      if (c === "\n") {
+        state = "normal";
+        out += c;
+      } else out += " ";
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && n === "/") {
+        state = "normal";
+        out += "  ";
+        i++;
+      } else out += " ";
+      continue;
+    }
+    if (state === "single") {
+      if (c === "'" && n === "'") {
+        out += "  ";
+        i++;
+      } else if (c === "'") {
+        state = "normal";
+        out += " ";
+      } else out += " ";
+      continue;
+    }
+
+    if (c === "-" && n === "-") {
+      state = "line";
+      out += "  ";
+      i++;
+      continue;
+    }
+    if (c === "/" && n === "*") {
+      state = "block";
+      out += "  ";
+      i++;
+      continue;
+    }
+    if (c === "'") {
+      state = "single";
+      out += " ";
+      continue;
+    }
+    out += c;
+  }
+  return out;
 }
 
 function findTopLevelKeyword(sql: string, keyword: string, start: number): number {

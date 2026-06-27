@@ -7,11 +7,12 @@ import { generate } from "./index.ts";
 const USAGE = `genpg - generate type-safe TypeScript from SQL for PostgreSQL
 
 Usage:
-  genpg generate [--config <path>]   Generate the output file (default command)
-  genpg --help                       Show this help
+  genpg generate [--config <path>] [--verbose]   Generate the output file (default command)
+  genpg --help                                  Show this help
 
 Options:
   -c, --config <path>   Path to config file (default: genpg.json)
+  -v, --verbose         Print progress/debug output to stderr
 
 Config (JSON):
   {
@@ -31,6 +32,7 @@ async function main(argv: string[]): Promise<number> {
   }
 
   let configPath = "genpg.json";
+  let verbose = process.env.GENPG_VERBOSE === "1" || process.env.GENPG_DEBUG === "1";
   const positional: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -38,6 +40,8 @@ async function main(argv: string[]): Promise<number> {
       configPath = args[++i] ?? configPath;
     } else if (a.startsWith("--config=")) {
       configPath = a.slice("--config=".length);
+    } else if (a === "--verbose" || a === "-v" || a === "--debug") {
+      verbose = true;
     } else {
       positional.push(a);
     }
@@ -49,8 +53,17 @@ async function main(argv: string[]): Promise<number> {
     return 1;
   }
 
+  const start = Date.now();
+  const progress = verbose
+    ? (message: string) => {
+        const elapsed = ((Date.now() - start) / 1000).toFixed(1);
+        process.stderr.write(`[genpg +${elapsed}s] ${message}\n`);
+      }
+    : undefined;
+
+  progress?.(`loading config ${configPath}`);
   const config = await loadConfig(configPath);
-  const result = await generate(config);
+  const result = await generate(config, { progress });
 
   process.stdout.write(
     `Generated ${result.count} quer${result.count === 1 ? "y" : "ies"} -> ${config.out}\n`,

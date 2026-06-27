@@ -10,7 +10,7 @@ extensions, and type behavior match the database that will execute the queries.
 ## Features
 
 - **Accurate types** — types come from Postgres itself (Parse/Describe), not a SQL parser, so joins, expressions, functions, enums, arrays, and domains all resolve correctly.
-- **Correct nullability** — `NOT NULL` columns are non-nullable; conservative expression/view outputs stay `T | null`, with safe inference for obvious `COALESCE(..., non_null_literal)` outputs and simple view column passthroughs.
+- **Correct nullability** — `NOT NULL` columns are non-nullable; conservative expression/view outputs stay `T | null`, with safe inference for common non-null expressions, simple view column passthroughs, generated-column expressions, and explicit `-- nonnull:` overrides.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
 - **Real PostgreSQL introspection** — supports server-version features and installed extensions.
 - **Schema from a file or dbmate-style migrations** — no dump required.
@@ -82,6 +82,13 @@ original Postgres column names at runtime.
 npx genpg
 ```
 
+Use `--verbose` (or `GENPG_VERBOSE=1`) to print progress/debug output while
+connecting, replaying schema, describing queries, and loading catalog metadata:
+
+```sh
+npx genpg --verbose
+```
+
 **5. Use the typed functions:**
 
 ```ts
@@ -131,6 +138,20 @@ await searchUsers(db, { status: "active", pattern: "%@example.com" });
 Reusing a name (`@id ... @id`) maps to a single positional placeholder. Parameters
 inside string literals, comments, and dollar-quoted blocks are left alone, so
 operators like `@>` are safe.
+
+### Nullability overrides
+
+When the database and conservative heuristics cannot prove a result column is
+non-null, add a query-local escape hatch:
+
+```sql
+-- name: ListCurrentIncomeSources :many
+-- nonnull: id, workspace_id, name
+SELECT id, workspace_id, name FROM current_income_sources;
+```
+
+The names are SQL output column names, before any `caseStyle` mapping. Use this
+sparingly: it tells TypeScript the column cannot be null at runtime.
 
 #### Markers
 

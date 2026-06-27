@@ -13,6 +13,7 @@ SELECT * FROM users ORDER BY id;
   expect(queries[0]).toEqual({
     name: "GetUser",
     command: "one",
+    nonNullColumns: [],
     sql: "SELECT id, email FROM users WHERE id = @id",
   });
   expect(queries[1].name).toBe("ListUsers");
@@ -25,6 +26,15 @@ test("keeps inner SQL comments in the body", () => {
 DELETE FROM t WHERE id = @id;`;
   const queries = parseQueryFile(src);
   expect(queries[0].sql).toBe("-- a note\nDELETE FROM t WHERE id = @id");
+});
+
+test("parses nonnull directives without keeping them in SQL", () => {
+  const queries = parseQueryFile(`-- name: X :many
+-- nonnull: id, workspace_id, "display name"
+SELECT id, workspace_id, display_name FROM t;`);
+
+  expect(queries[0].nonNullColumns).toEqual(["id", "workspace_id", "display name"]);
+  expect(queries[0].sql).toBe("SELECT id, workspace_id, display_name FROM t");
 });
 
 test("rejects unknown commands", () => {

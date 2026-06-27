@@ -34,24 +34,43 @@ export interface GenerateResult {
   warnings: string[];
 }
 
+export interface GenerateOptions {
+  progress?: (message: string) => void;
+}
+
 /** Run the full pipeline for a resolved config and write the output file. */
-export async function generate(config: ResolvedConfig): Promise<GenerateResult> {
+export async function generate(
+  config: ResolvedConfig,
+  options: GenerateOptions = {},
+): Promise<GenerateResult> {
+  const progress = options.progress;
+
+  progress?.(`reading ${config.queryFiles.length} query file(s)`);
   const queries: ParsedQuery[] = [];
   for (const file of config.queryFiles) {
+    progress?.(`reading query file ${file}`);
     const content = await readFile(file, "utf8");
     queries.push(...parseQueryFile(content, file));
   }
 
+  progress?.(`loaded ${queries.length} quer${queries.length === 1 ? "y" : "ies"}`);
+  progress?.("loading schema SQL");
   const schema = await resolveSchema(config);
+  progress?.("connecting to PostgreSQL");
   const engine = await PgEngine.create(config.connection);
 
   try {
+    progress?.("starting introspection");
     const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
       engine,
       queries,
       schema,
+      progress,
     });
 
+    progress?.(
+      `generating TypeScript for ${analyzed.length} quer${analyzed.length === 1 ? "y" : "ies"}`,
+    );
     const code = generateModule(analyzed, {
       typeInfo,
       notNull,
@@ -62,12 +81,15 @@ export async function generate(config: ResolvedConfig): Promise<GenerateResult> 
       runtime: config.typeRuntime,
       caseStyle: config.caseStyle,
     });
+    progress?.(`writing output ${config.out}`);
     await mkdir(dirname(config.out), { recursive: true });
     await writeFile(config.out, code, "utf8");
 
+    progress?.("checking override warnings");
     const warnings = collectOverrideWarnings(analyzed, typeInfo, config);
     return { code, count: analyzed.length, errors, warnings };
   } finally {
+    progress?.("closing PostgreSQL connection");
     await engine.dispose();
   }
 }

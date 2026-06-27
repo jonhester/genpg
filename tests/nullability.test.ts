@@ -1,6 +1,8 @@
 import { expect, test } from "vite-plus/test";
 import {
   fromAliases,
+  columnRefsInExpression,
+  inferNonNullExpression,
   inferNonNullOutputColumns,
   selectExpressions,
   simpleColumnRef,
@@ -16,6 +18,28 @@ test("infers COALESCE with a non-null literal output as not null", () => {
   `);
 
   expect([...inferred]).toEqual([1]);
+});
+
+test("infers standalone generated-column expressions", () => {
+  expect(inferNonNullExpression("COALESCE(monthly_cents, 0)::bigint")).toBe(true);
+  expect(inferNonNullExpression("(COALESCE(monthly_cents, 0))")).toBe(true);
+  expect(
+    inferNonNullExpression("u.first_name || ' ' || u.last_name", {
+      isNonNullColumn: (ref) => ref.table === "u",
+    }),
+  ).toBe(true);
+  expect(
+    inferNonNullExpression("date_trunc('month', u.created_at)", {
+      isNonNullColumn: (ref) => ref.table === "u" && ref.column === "created_at",
+    }),
+  ).toBe(true);
+  expect(
+    inferNonNullExpression("u.first_name || ' ' || u.nickname", {
+      isNonNullColumn: (ref) => ref.column !== "nickname",
+    }),
+  ).toBe(false);
+  expect(inferNonNullExpression("monthly_cents + 1")).toBe(false);
+  expect(inferNonNullExpression("NULL::bigint")).toBe(false);
 });
 
 test("handles quoted strings, casts, aliases, and view definitions", () => {
@@ -55,6 +79,13 @@ test("extracts simple select column references", () => {
   expect(simpleColumnRef(expressions[2]!)).toBeNull();
 });
 
+test("extracts column refs from expressions without reading string literals", () => {
+  expect(columnRefsInExpression("u.first_name || 'x.y' || u.last_name")).toEqual([
+    { table: "u", column: "first_name" },
+    { table: "u", column: "last_name" },
+  ]);
+});
+
 test("marks aliases from outer-join nullable sides", () => {
   expect(
     fromAliases(`
@@ -67,5 +98,33 @@ test("marks aliases from outer-join nullable sides", () => {
     { alias: "w", relation: "workspaces", nullable: false },
     { alias: "bt", relation: "bucket_types", nullable: false },
     { alias: "wb", relation: "workspace_buckets", nullable: true },
+  ]);
+});
+
+test("extracts primary FROM alias through pg_get_viewdef join parentheses", () => {
+  expect(
+    fromAliases(`
+      SELECT w.id, bt.code, wb.planned_cents
+      FROM (workspaces w
+        CROSS JOIN bucket_types bt)
+        LEFT JOIN workspace_buckets wb ON wb.workspace_id = w.id
+    `),
+  ).toEqual([
+    { alias: "w", relation: "workspaces", nullable: false },
+    { alias: "bt", relation: "bucket_types", nullable: false },
+    { alias: "wb", relation: "workspace_buckets", nullable: true },
+  ]);
+});
+
+test("does not treat a following join keyword as an alias", () => {
+  expect(
+    fromAliases(`
+      SELECT users.id, profiles.bio
+      FROM users
+      LEFT JOIN profiles ON profiles.user_id = users.id
+    `),
+  ).toEqual([
+    { alias: "users", relation: "users", nullable: false },
+    { alias: "profiles", relation: "profiles", nullable: true },
   ]);
 });

@@ -152,6 +152,80 @@ dbTest("infers obvious non-null COALESCE output from query expressions and views
   }
 });
 
+dbTest("infers obvious non-null generated column expressions", async () => {
+  const table = `genpg_generated_nullability_${process.pid}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const [version] = await engine.queryRows("SHOW server_version_num");
+    if (Number(version.server_version_num) < 120000) return;
+
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${table} (
+          id int PRIMARY KEY,
+          monthly_cents bigint,
+          normalized_monthly_cents bigint
+            GENERATED ALWAYS AS (COALESCE(monthly_cents, 0)::bigint) STORED,
+          maybe_monthly_cents bigint
+            GENERATED ALWAYS AS (monthly_cents + 1) STORED
+        );
+      `,
+      queries: parseQueryFile(`
+        -- name: GeneratedAmounts :one
+        SELECT normalized_monthly_cents, maybe_monthly_cents FROM ${table};
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+    expect(code).toContain("normalized_monthly_cents: string;");
+    expect(code).toContain("maybe_monthly_cents: string | null;");
+  } finally {
+    await engine.dispose();
+  }
+});
+
+dbTest("supports manual nonnull directives and strict expression inference", async () => {
+  const table = `genpg_expression_nullability_${process.pid}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${table} (
+          id int PRIMARY KEY,
+          first_name text NOT NULL,
+          last_name text NOT NULL,
+          nickname text,
+          created_at timestamptz NOT NULL
+        );
+      `,
+      queries: parseQueryFile(`
+        -- name: ExpressionNames :one
+        SELECT
+          n.first_name || ' ' || n.last_name AS display_name,
+          n.first_name || n.nickname AS maybe_name,
+          date_trunc('month', n.created_at) AS created_month
+        FROM ${table} n;
+
+        -- name: ManualNonnull :one
+        -- nonnull: nickname
+        SELECT nickname FROM ${table};
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+    expect(code).toContain("display_name: string;");
+    expect(code).toContain("maybe_name: string | null;");
+    expect(code).toContain("created_month: Date;");
+    expect(code).toContain("export interface ManualNonnullRow {\n  nickname: string;");
+  } finally {
+    await engine.dispose();
+  }
+});
+
 dbTest("type overrides apply by real Postgres type name (Temporal)", async () => {
   const engine = await PgEngine.create(connection!);
   try {
@@ -400,6 +474,7 @@ dbTest("warns about overrides that will break at runtime, unless runtime is none
 dbTest("reports per-query errors without aborting the rest", async () => {
   const engine = await PgEngine.create(connection!);
   try {
+    const progress: string[] = [];
     const { analyzed, errors } = await analyzeQueries({
       engine,
       queries: parseQueryFile(`
@@ -410,11 +485,17 @@ SELECT id FROM users;
 SELECT * FROM table_that_does_not_exist;
 `),
       schema: SCHEMA,
+      progress: (message) => progress.push(message),
     });
 
     expect(analyzed.map((a) => a.query.name)).toEqual(["Good"]);
     expect(errors.length).toBe(1);
     expect(errors[0].name).toBe("Bad");
+    expect(progress).toContain("applying schema");
+    expect(progress).toContain("describing query Good");
+    expect(progress).toContain("describing query Bad");
+    expect(progress.some((m) => m.startsWith("query Bad failed:"))).toBe(true);
+    expect(progress).toContain("loading PostgreSQL type catalog");
   } finally {
     await engine.dispose();
   }
