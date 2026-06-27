@@ -1,12 +1,15 @@
 import { expect, test } from "vite-plus/test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { PGlite } from "@electric-sql/pglite";
-import { PgliteEngine } from "../src/engine.ts";
+import { Client } from "pg";
+import { PgEngine } from "../src/engine.ts";
 import { analyzeQueries } from "../src/introspect.ts";
 import { parseQueryFile } from "../src/sqlfile.ts";
 import { generateModule } from "../src/codegen.ts";
 import { generateFromConfig } from "../src/index.ts";
+
+const connection = process.env.TEST_DATABASE_URL;
+const dbTest = test.skipIf(!connection);
 
 const SCHEMA = `
 CREATE TYPE mood AS ENUM ('sad', 'ok', 'happy');
@@ -34,8 +37,8 @@ INSERT INTO users (email, nickname) VALUES (@email, @nickname);
 DELETE FROM users WHERE id = @id;
 `;
 
-test("end-to-end introspection + codegen against in-process pglite", async () => {
-  const engine = await PgliteEngine.create();
+dbTest("end-to-end introspection + codegen against PostgreSQL", async () => {
+  const engine = await PgEngine.create(connection!);
   try {
     const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
       engine,
@@ -84,8 +87,8 @@ test("end-to-end introspection + codegen against in-process pglite", async () =>
   }
 });
 
-test("type overrides apply by real Postgres type name (Temporal)", async () => {
-  const engine = await PgliteEngine.create();
+dbTest("type overrides apply by real Postgres type name (Temporal)", async () => {
+  const engine = await PgEngine.create(connection!);
   try {
     const { analyzed, typeInfo, notNull } = await analyzeQueries({
       engine,
@@ -118,8 +121,8 @@ SELECT id, created, dates FROM users WHERE id = @id;
   }
 });
 
-test("hydrates result rows and serializes params for runtime conversion", async () => {
-  const engine = await PgliteEngine.create();
+dbTest("hydrates result rows and serializes params for runtime conversion", async () => {
+  const engine = await PgEngine.create(connection!);
   try {
     const { analyzed, typeInfo, notNull } = await analyzeQueries({
       engine,
@@ -156,7 +159,7 @@ SELECT id, created FROM events WHERE created >= @since;
   }
 });
 
-test("generated hydration + serialization round-trips through pglite", async () => {
+dbTest("generated hydration + serialization round-trips through PostgreSQL", async () => {
   // Override `text` so values are upper-cased on read and lower-cased on write.
   const schema = `CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL);`;
   const queries = `
@@ -167,7 +170,7 @@ INSERT INTO t (id, name) VALUES (@id, @name) RETURNING id, name;
 SELECT id, name FROM t WHERE id = @id;
 `;
 
-  const engine = await PgliteEngine.create();
+  const engine = await PgEngine.create(connection!);
   let code: string;
   try {
     const { analyzed, typeInfo, notNull } = await analyzeQueries({
@@ -191,14 +194,10 @@ SELECT id, name FROM t WHERE id = @id;
   const file = new URL(`hyd_${Date.now()}_${Math.random().toString(36).slice(2)}.ts`, dir);
   await writeFile(file, code);
 
-  const pg = await PGlite.create();
-  await pg.exec(schema);
-  const db = {
-    async query(text: string, values: unknown[]) {
-      const r = await pg.query(text, values as any[]);
-      return { rows: r.rows as any[], rowCount: (r as any).affectedRows ?? r.rows.length };
-    },
-  };
+  const db = new Client({ connectionString: connection });
+  await db.connect();
+  await db.query("BEGIN");
+  await db.query(schema);
 
   try {
     const mod: any = await import(file.href);
@@ -209,12 +208,13 @@ SELECT id, name FROM t WHERE id = @id;
     const got = await mod.get(db, { id: 1 });
     expect(got.name).toBe("HELLO");
   } finally {
-    await pg.close();
+    await db.query("ROLLBACK");
+    await db.end();
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("generated array + spread queries actually execute against pglite", async () => {
+dbTest("generated array + spread queries actually execute against PostgreSQL", async () => {
   const schema = `CREATE TABLE items (id int PRIMARY KEY, name text NOT NULL);`;
   const queries = `
 -- name: InsertItems :execrows
@@ -224,7 +224,7 @@ INSERT INTO items (id, name) VALUES @rows(spread);
 SELECT id, name FROM items WHERE id IN @ids(array) ORDER BY id;
 `;
 
-  const engine = await PgliteEngine.create();
+  const engine = await PgEngine.create(connection!);
   let code: string;
   try {
     const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
@@ -244,15 +244,11 @@ SELECT id, name FROM items WHERE id IN @ids(array) ORDER BY id;
   const file = new URL(`gen_${Date.now()}_${Math.random().toString(36).slice(2)}.ts`, dir);
   await writeFile(file, code);
 
-  // A fresh DB with the same schema, wrapped as a Queryable.
-  const pg = await PGlite.create();
-  await pg.exec(schema);
-  const db = {
-    async query(text: string, values: unknown[]) {
-      const r = await pg.query(text, values as any[]);
-      return { rows: r.rows as any[], rowCount: (r as any).affectedRows ?? r.rows.length };
-    },
-  };
+  // Execute against the same PostgreSQL implementation used for introspection.
+  const db = new Client({ connectionString: connection });
+  await db.connect();
+  await db.query("BEGIN");
+  await db.query(schema);
 
   try {
     const mod: any = await import(file.href);
@@ -279,12 +275,13 @@ SELECT id, name FROM items WHERE id IN @ids(array) ORDER BY id;
     const zero = await mod.insertItems(db, { rows: [] });
     expect(zero).toBe(0);
   } finally {
-    await pg.close();
+    await db.query("ROLLBACK");
+    await db.end();
     await rm(dir, { recursive: true, force: true });
   }
 });
 
-test("warns about overrides that will break at runtime, unless runtime is none", async () => {
+dbTest("warns about overrides that will break at runtime, unless runtime is none", async () => {
   const dir = new URL("./__tmp__/warn/", import.meta.url);
   await mkdir(dir, { recursive: true });
   await writeFile(
@@ -300,7 +297,13 @@ test("warns about overrides that will break at runtime, unless runtime is none",
   try {
     // Type-only override: `at` (result) and `since` (param) both lack converters.
     const bad = await generateFromConfig(
-      { schema: "schema.sql", queries: "q.sql", out: "out.ts", overrides: { timestamptz: "X" } },
+      {
+        connection: connection!,
+        schema: "schema.sql",
+        queries: "q.sql",
+        out: "out.ts",
+        overrides: { timestamptz: "X" },
+      },
       base,
     );
     expect(bad.warnings.length).toBe(2);
@@ -312,6 +315,7 @@ test("warns about overrides that will break at runtime, unless runtime is none",
     // Declaring runtime: "none" silences the advisories.
     const ok = await generateFromConfig(
       {
+        connection: connection!,
         schema: "schema.sql",
         queries: "q.sql",
         out: "out.ts",
@@ -325,8 +329,8 @@ test("warns about overrides that will break at runtime, unless runtime is none",
   }
 });
 
-test("reports per-query errors without aborting the rest", async () => {
-  const engine = await PgliteEngine.create();
+dbTest("reports per-query errors without aborting the rest", async () => {
+  const engine = await PgEngine.create(connection!);
   try {
     const { analyzed, errors } = await analyzeQueries({
       engine,

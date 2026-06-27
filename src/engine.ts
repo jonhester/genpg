@@ -1,13 +1,6 @@
-/**
- * Introspection engine: in-process Postgres (PGlite, compiled to WASM).
- *
- * No server, no Docker, no connection string — codegen runs anywhere, including
- * CI, with zero services. The schema/migrations are applied to a fresh in-memory
- * database, then each query is Parse/Described to read its parameter and result
- * types. Nothing is ever executed, so there are no side effects.
- */
+/** PostgreSQL introspection engine backed by node-postgres. */
 
-import { PGlite, protocol } from "@electric-sql/pglite";
+import { Client, type Connection, type FieldDef } from "pg";
 import type { QueryColumn, QueryShape } from "./model.ts";
 
 export interface IntrospectionEngine {
@@ -30,63 +23,111 @@ function toColumn(f: any): QueryColumn {
   };
 }
 
-/** Build a QueryShape from the backend messages of a Describe round-trip. */
-function shapeFromMessages(messages: any[]): QueryShape {
-  let params: number[] = [];
-  let columns: QueryColumn[] | null = null;
-  for (const m of messages) {
-    switch (m?.name) {
-      case "parameterDescription":
-        params = m.dataTypeIDs as number[];
-        break;
-      case "rowDescription":
-        columns = (m.fields as any[]).map(toColumn);
-        break;
-      case "noData":
-        if (columns === null) columns = [];
-        break;
-      case "error":
-        throw new Error(m.message ?? "describe failed");
-    }
-  }
-  return { params, columns };
+interface ParameterDescription {
+  dataTypeIDs: number[];
 }
 
-export class PgliteEngine implements IntrospectionEngine {
-  private constructor(private readonly db: PGlite) {}
+interface RowDescription {
+  fields: FieldDef[];
+}
 
-  static async create(): Promise<PgliteEngine> {
-    return new PgliteEngine(await PGlite.create());
+/**
+ * A real PostgreSQL engine. Schema replay and catalog inspection share one
+ * transaction, which is always rolled back when generation finishes.
+ */
+export class PgEngine implements IntrospectionEngine {
+  private constructor(private readonly client: Client) {}
+
+  static async create(connectionString: string): Promise<PgEngine> {
+    const client = new Client({ connectionString, application_name: "genpg" });
+    await client.connect();
+    try {
+      await client.query("BEGIN");
+      return new PgEngine(client);
+    } catch (error) {
+      await client.end();
+      throw error;
+    }
   }
 
   async applySchema(sql: string): Promise<void> {
-    if (sql.trim()) await this.db.exec(sql);
+    if (sql.trim()) await this.client.query(sql);
   }
 
   async describe(sql: string): Promise<QueryShape> {
-    // A Parse error in the raw protocol wedges the WASM backend, but PGlite's
-    // high-level query() recovers from errors cleanly. So we validate the SQL by
-    // PREPARE-ing it (throws a readable error if invalid, recoverably), then run
-    // the protocol Describe only on the now-known-valid prepared statement.
-    const name = "genpg_describe_stmt";
-    await this.db.query(`DEALLOCATE ${name}`).catch(() => {});
-    await this.db.query(`PREPARE ${name} AS ${sql}`);
+    const savepoint = "genpg_describe";
+    await this.client.query(`SAVEPOINT ${savepoint}`);
     try {
-      const { serialize } = protocol;
-      const message = Buffer.concat([serialize.describe({ type: "S", name }), serialize.sync()]);
-      const { messages } = await this.db.execProtocol(message);
-      return shapeFromMessages(messages as any[]);
-    } finally {
-      await this.db.query(`DEALLOCATE ${name}`).catch(() => {});
+      const shape = await this.describeRaw(sql);
+      await this.client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      return shape;
+    } catch (error) {
+      // Parse errors abort the current transaction. Rewind only this query so
+      // analysis can report it and continue describing the remaining queries.
+      await this.client.query(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+      await this.client.query(`RELEASE SAVEPOINT ${savepoint}`);
+      throw error;
     }
   }
 
+  private async describeRaw(sql: string): Promise<QueryShape> {
+    return new Promise<QueryShape>((resolve, reject) => {
+      let params: number[] = [];
+      let columns: QueryColumn[] | null = null;
+      let settled = false;
+      const connection = this.client.connection;
+
+      const onParameterDescription = (message: ParameterDescription): void => {
+        params = message.dataTypeIDs;
+      };
+      const onNoData = (): void => {
+        columns = [];
+      };
+      const cleanup = (): void => {
+        connection.off("parameterDescription", onParameterDescription);
+        connection.off("noData", onNoData);
+      };
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve({ params, columns });
+      };
+
+      const query = {
+        submit(conn: Connection): void {
+          connection.on("parameterDescription", onParameterDescription);
+          connection.on("noData", onNoData);
+          conn.parse({ name: "", text: sql, types: [] }, true);
+          conn.describe({ type: "S", name: "" }, true);
+          conn.sync();
+        },
+        handleRowDescription(message: RowDescription): void {
+          columns = message.fields.map(toColumn);
+        },
+        handleError(error: Error): void {
+          finish(error);
+        },
+        handleReadyForQuery(): void {
+          finish();
+        },
+      };
+
+      this.client.query(query);
+    });
+  }
+
   async queryRows(sql: string): Promise<any[]> {
-    const res = await this.db.query(sql);
-    return res.rows as any[];
+    const result = await this.client.query(sql);
+    return result.rows;
   }
 
   async dispose(): Promise<void> {
-    await this.db.close();
+    try {
+      await this.client.query("ROLLBACK");
+    } finally {
+      await this.client.end();
+    }
   }
 }

@@ -5,6 +5,8 @@ import { glob } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 
 export interface GenpgConfig {
+  /** Dedicated PostgreSQL connection URL. The CLI also accepts DATABASE_URL. */
+  connection?: string;
   /** Path to a schema .sql file. Mutually exclusive with `migrations`. */
   schema?: string;
   /** Path to a dbmate-style migrations directory. Mutually exclusive with `schema`. */
@@ -41,6 +43,7 @@ export type OverrideValue =
     };
 
 export interface ResolvedConfig {
+  connection: string;
   schemaFile?: string;
   migrationsDir?: string;
   queryFiles: string[];
@@ -65,12 +68,20 @@ export async function loadConfig(configPath: string): Promise<ResolvedConfig> {
   } catch (e: any) {
     throw new Error(`Failed to read config "${abs}": ${e?.message ?? e}`);
   }
+  if (!raw.connection && process.env.DATABASE_URL) {
+    raw.connection = process.env.DATABASE_URL;
+  }
   return resolveConfig(raw, dirname(abs));
 }
 
 export async function resolveConfig(raw: GenpgConfig, baseDir: string): Promise<ResolvedConfig> {
   if (!raw.queries) throw new Error("Config is missing `queries`.");
   if (!raw.out) throw new Error("Config is missing `out`.");
+  if (!raw.connection) {
+    throw new Error(
+      "Config needs PostgreSQL. Set `connection` or the DATABASE_URL environment variable.",
+    );
+  }
   if (raw.schema && raw.migrations) {
     throw new Error("Specify only one of `schema` or `migrations`.");
   }
@@ -88,6 +99,7 @@ export async function resolveConfig(raw: GenpgConfig, baseDir: string): Promise<
   }
 
   return {
+    connection: raw.connection,
     schemaFile,
     migrationsDir,
     queryFiles,

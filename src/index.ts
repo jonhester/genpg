@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { loadConfig, resolveConfig, type ResolvedConfig, type GenpgConfig } from "./config.ts";
 import { parseQueryFile, type ParsedQuery } from "./sqlfile.ts";
 import { loadMigrationsUp } from "./migrations.ts";
-import { PgliteEngine } from "./engine.ts";
+import { PgEngine } from "./engine.ts";
 import { analyzeQueries } from "./introspect.ts";
 import { generateModule } from "./codegen.ts";
 import type { AnalyzedQuery } from "./model.ts";
@@ -17,7 +17,7 @@ export type { RewrittenQuery } from "./params.ts";
 export type { AnalyzedQuery, QueryColumn, QueryShape } from "./model.ts";
 export type { Queryable, QueryResultLike } from "./runtime.ts";
 export type { IntrospectionEngine } from "./engine.ts";
-export { PgliteEngine } from "./engine.ts";
+export { PgEngine } from "./engine.ts";
 export { parseQueryFile } from "./sqlfile.ts";
 export { rewriteNamedParams } from "./params.ts";
 export { generateModule } from "./codegen.ts";
@@ -43,7 +43,7 @@ export async function generate(config: ResolvedConfig): Promise<GenerateResult> 
   }
 
   const schema = await resolveSchema(config);
-  const engine = await PgliteEngine.create();
+  const engine = await PgEngine.create(config.connection);
 
   try {
     const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({

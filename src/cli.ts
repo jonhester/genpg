@@ -15,7 +15,7 @@ Options:
 
 Config (JSON):
   {
-    "connection": "postgres://user:pass@localhost:5432/db",  // or DATABASE_URL
+    "connection": "postgres://user:pass@localhost:5432/db",  // or set DATABASE_URL
     "schema": "schema.sql",                                  // optional
     "queries": "src/queries/**/*.sql",
     "out": "src/db/queries.ts"

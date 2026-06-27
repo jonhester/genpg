@@ -2,18 +2,17 @@
 
 Type-safe TypeScript from SQL queries for PostgreSQL — like [sqlc](https://sqlc.dev), but for TypeScript.
 
-You write plain SQL in `.sql` files with a small annotation. `genpg` introspects a
-real Postgres to learn the exact parameter and result types, then generates typed
-TypeScript functions. By default it uses **[PGlite](https://pglite.dev)** (Postgres
-compiled to WASM) in-process, so **no database server is required** — codegen runs
-anywhere, including CI, with zero services.
+You write plain SQL in `.sql` files with a small annotation. `genpg` asks Postgres
+for the exact parameter and result types, then generates typed TypeScript functions.
+Connect it to the same PostgreSQL major version you run in production so functions,
+extensions, and type behavior match the database that will execute the queries.
 
 ## Features
 
 - **Accurate types** — types come from Postgres itself (Parse/Describe), not a SQL parser, so joins, expressions, functions, enums, arrays, and domains all resolve correctly.
 - **Correct nullability** — `NOT NULL` columns are non-nullable; everything else is `T | null`.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
-- **No database server needed** — schema is introspected in-process via PGlite; nothing to stand up, even in CI.
+- **Real PostgreSQL introspection** — supports server-version features and installed extensions.
 - **Schema from a file or dbmate-style migrations** — no dump required.
 - **Driver-agnostic output** — generated code targets a tiny `Queryable` interface; works directly with `pg`, or via an adapter with `postgres.js`.
 
@@ -57,11 +56,19 @@ RETURNING id, email, created_at;
 
 ```json
 {
+  "connection": "postgres://postgres:postgres@localhost:5432/genpg",
   "schema": "db/schema.sql",
   "queries": "db/queries/**/*.sql",
   "out": "src/db/queries.ts"
 }
 ```
+
+The CLI also reads `DATABASE_URL` when `connection` is omitted. Genpg applies the
+schema and performs all introspection in one transaction, then rolls it back. Use a
+dedicated empty database: existing objects can conflict with replayed migrations,
+and migrations containing transaction control or commands such as `CREATE DATABASE`
+are not supported. The programmatic `generateFromConfig` API requires the explicit
+config value.
 
 **4. Generate:**
 
@@ -169,13 +176,12 @@ dump needed — the `-- migrate:up` blocks are applied in filename order):
 { "migrations": "db/migrations", "queries": "db/queries/**/*.sql", "out": "src/db/queries.ts" }
 ```
 
-Your schema/migrations are applied to a fresh **in-process** Postgres ([PGlite](https://pglite.dev))
-each run, so the generated types always match your migration files — no database
-server, no connection string, no drift.
+Your schema/migrations are applied on every run. The work is wrapped in a transaction
+and rolled back after introspection.
 
 ## Use it in CI
 
-Commit the generated file and verify it stays in sync — no services to start:
+Commit the generated file and verify it stays in sync:
 
 ```sh
 npx genpg && git diff --exit-code src/db/queries.ts
