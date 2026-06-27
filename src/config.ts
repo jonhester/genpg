@@ -15,6 +15,8 @@ export interface GenpgConfig {
   queries: string | string[];
   /** Output .ts file path. */
   out: string;
+  /** TypeScript field naming style for params and result rows. Defaults to `preserve`. */
+  caseStyle?: CaseStyle;
   /**
    * Map Postgres type names to custom TypeScript types, e.g.
    * `{ "timestamptz": "Temporal.Instant" }`. The object form additionally allows:
@@ -29,6 +31,8 @@ export interface GenpgConfig {
    */
   overrides?: Record<string, OverrideValue>;
 }
+
+export type CaseStyle = "preserve" | "camel";
 
 export type OverrideRuntime = "hydrate" | "none";
 
@@ -48,6 +52,7 @@ export interface ResolvedConfig {
   migrationsDir?: string;
   queryFiles: string[];
   out: string;
+  caseStyle: CaseStyle;
   /** Postgres type name -> TS type. */
   typeOverrides: Map<string, string>;
   /** De-duplicated import lines to emit in the generated file. */
@@ -85,6 +90,9 @@ export async function resolveConfig(raw: GenpgConfig, baseDir: string): Promise<
   if (raw.schema && raw.migrations) {
     throw new Error("Specify only one of `schema` or `migrations`.");
   }
+  if (raw.caseStyle && raw.caseStyle !== "preserve" && raw.caseStyle !== "camel") {
+    throw new Error('Config `caseStyle` must be "preserve" or "camel".');
+  }
 
   const schemaFile = raw.schema ? resolve(baseDir, raw.schema) : undefined;
   const migrationsDir = raw.migrations ? resolve(baseDir, raw.migrations) : undefined;
@@ -104,6 +112,7 @@ export async function resolveConfig(raw: GenpgConfig, baseDir: string): Promise<
     migrationsDir,
     queryFiles,
     out: resolve(baseDir, raw.out),
+    caseStyle: raw.caseStyle ?? "preserve",
     ...resolveOverrides(raw.overrides),
   };
 }

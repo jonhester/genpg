@@ -51,6 +51,8 @@ test("generates a :one function with args and a row interface", () => {
     "export async function getUser(db: Queryable, args: GetUserArgs): Promise<GetUserRow | null>",
   );
   expect(code).toContain("await db.query(getUserSql, [args.id])");
+  expect(code).toContain("export function bind(db: Queryable)");
+  expect(code).toContain("getUser: (args: GetUserArgs) => getUser(db, args)");
   expect(code).toContain("interface Queryable"); // inlined runtime
 });
 
@@ -90,6 +92,59 @@ test("applies type overrides and emits import lines", () => {
   expect(code).toContain("id: number;"); // non-overridden param unaffected
 });
 
+test("uses inferred expression nullability for result columns", () => {
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "Plan",
+        command: "one",
+        sql: "SELECT COALESCE(planned_cents, 0) AS planned_cents",
+      },
+      rewritten: staticRewritten("SELECT COALESCE(planned_cents, 0) AS planned_cents", []),
+      shape: {
+        params: [],
+        columns: [{ name: "planned_cents", tableOid: 0, columnAttr: 0, typeOid: 20 }],
+      },
+      inferredNotNullColumns: new Set([0]),
+    },
+  ];
+
+  const code = generateModule(analyzed, ctx());
+  expect(code).toContain("planned_cents: string;");
+  expect(code).not.toContain("planned_cents: string | null;");
+});
+
+test("camel caseStyle maps params, result rows, and runtime row keys", () => {
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "GetWorkspace",
+        command: "one",
+        sql: "SELECT workspace_id, full_name FROM users WHERE full_name = @full_name",
+      },
+      rewritten: staticRewritten("SELECT workspace_id, full_name FROM users WHERE full_name = $1", [
+        scalarParam("full_name", 1),
+      ]),
+      shape: {
+        params: [25],
+        columns: [
+          { name: "workspace_id", tableOid: 100, columnAttr: 1, typeOid: 20 },
+          { name: "full_name", tableOid: 100, columnAttr: 2, typeOid: 25 },
+        ],
+      },
+    },
+  ];
+
+  const code = generateModule(analyzed, { ...ctx(), caseStyle: "camel" });
+  expect(code).toContain("export interface GetWorkspaceArgs {\n  fullName: string;\n}");
+  expect(code).toContain("workspaceId: string;");
+  expect(code).toContain("fullName: string | null;");
+  expect(code).toContain("await db.query(getWorkspaceSql, [args.fullName])");
+  expect(code).toContain("workspaceId: r.workspace_id,");
+  expect(code).toContain("fullName: r.full_name,");
+  expect(code).toContain("return row ? hydrateGetWorkspaceRow(row) : null;");
+});
+
 test("generates :exec and :execrows without a row interface", () => {
   const analyzed: AnalyzedQuery[] = [
     {
@@ -110,5 +165,7 @@ test("generates :exec and :execrows without a row interface", () => {
   );
   expect(code).not.toContain("DeleteUserRow");
   expect(code).toContain("export async function touch(db: Queryable): Promise<number>");
+  expect(code).toContain("deleteUser: (args: DeleteUserArgs) => deleteUser(db, args)");
+  expect(code).toContain("touch: () => touch(db)");
   expect(code).toContain("return result.rowCount ?? 0;");
 });

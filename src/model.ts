@@ -25,4 +25,6 @@ export interface AnalyzedQuery {
   query: ParsedQuery;
   rewritten: RewrittenQuery;
   shape: QueryShape;
+  /** 0-based result column indexes inferred non-null from SQL expressions. */
+  inferredNotNullColumns?: ReadonlySet<number>;
 }

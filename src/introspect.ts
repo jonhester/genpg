@@ -9,6 +9,12 @@ import { rewriteNamedParams } from "./params.ts";
 import type { AnalyzedQuery } from "./model.ts";
 import { attrKey, type TypeInfo } from "./typemap.ts";
 import type { IntrospectionEngine } from "./engine.ts";
+import {
+  fromAliases,
+  inferNonNullOutputColumns,
+  selectExpressions,
+  simpleColumnRef,
+} from "./nullability.ts";
 
 export interface AnalyzeOptions {
   engine: IntrospectionEngine;
@@ -36,7 +42,12 @@ export async function analyzeQueries(opts: AnalyzeOptions): Promise<AnalyzeResul
     const rewritten = rewriteNamedParams(query.sql);
     try {
       const shape = await engine.describe(rewritten.introspectText);
-      analyzed.push({ query, rewritten, shape });
+      analyzed.push({
+        query,
+        rewritten,
+        shape,
+        inferredNotNullColumns: inferNonNullOutputColumns(query.sql),
+      });
     } catch (e: any) {
       errors.push({ name: query.name, error: e?.message ?? String(e) });
     }
@@ -108,12 +119,65 @@ async function loadNotNull(
   // introspection, never user input, so there is nothing to escape.
   const values = pairs.map(([rel, att]) => `(${rel},${att})`).join(",");
   const rows = await engine.queryRows(
-    `SELECT a.attrelid::int4 AS relid, a.attnum::int4 AS attnum, a.attnotnull
+    `SELECT a.attrelid::int4 AS relid, a.attnum::int4 AS attnum, a.attnotnull,
+            c.relkind, pg_get_viewdef(c.oid) AS viewdef
      FROM (VALUES ${values}) AS t(relid, attnum)
-     JOIN pg_attribute a ON a.attrelid = t.relid::oid AND a.attnum = t.attnum`,
+     JOIN pg_attribute a ON a.attrelid = t.relid::oid AND a.attnum = t.attnum
+     JOIN pg_class c ON c.oid = a.attrelid`,
   );
   for (const r of rows) {
-    map.set(attrKey(r.relid, r.attnum), r.attnotnull === true);
+    let isNotNull = r.attnotnull === true;
+    if (!isNotNull && (r.relkind === "v" || r.relkind === "m") && typeof r.viewdef === "string") {
+      isNotNull = (await inferViewNotNullColumns(engine, r.viewdef)).has(r.attnum - 1);
+    }
+    map.set(attrKey(r.relid, r.attnum), isNotNull);
   }
   return map;
+}
+
+async function inferViewNotNullColumns(
+  engine: IntrospectionEngine,
+  viewdef: string,
+): Promise<Set<number>> {
+  const out = inferNonNullOutputColumns(viewdef);
+  const aliases = new Map(fromAliases(viewdef).map((a) => [a.alias, a]));
+  const refs = new Map<string, { relation: string; column: string }>();
+
+  selectExpressions(viewdef).forEach((expr) => {
+    const ref = simpleColumnRef(expr);
+    if (!ref) return;
+    const source = aliases.get(ref.table);
+    if (!source || source.nullable) return;
+    const key = `${source.relation}\0${ref.column}`;
+    refs.set(key, { relation: source.relation, column: ref.column });
+  });
+
+  if (refs.size === 0) return out;
+
+  const values = [...refs.values()]
+    .map((r) => `(${sqlString(r.relation)},${sqlString(r.column)})`)
+    .join(",");
+  const rows = await engine.queryRows(
+    `SELECT refs.relation, refs.column_name, a.attnotnull
+     FROM (VALUES ${values}) AS refs(relation, column_name)
+     JOIN pg_class c ON c.oid = to_regclass(refs.relation)
+     JOIN pg_attribute a ON a.attrelid = c.oid AND a.attname = refs.column_name`,
+  );
+  const notNullRefs = new Set(
+    rows.filter((r) => r.attnotnull === true).map((r) => `${r.relation}\0${r.column_name}`),
+  );
+
+  selectExpressions(viewdef).forEach((expr, idx) => {
+    const ref = simpleColumnRef(expr);
+    if (!ref) return;
+    const source = aliases.get(ref.table);
+    if (!source || source.nullable) return;
+    if (notNullRefs.has(`${source.relation}\0${ref.column}`)) out.add(idx);
+  });
+
+  return out;
+}
+
+function sqlString(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }

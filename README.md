@@ -10,7 +10,7 @@ extensions, and type behavior match the database that will execute the queries.
 ## Features
 
 - **Accurate types** — types come from Postgres itself (Parse/Describe), not a SQL parser, so joins, expressions, functions, enums, arrays, and domains all resolve correctly.
-- **Correct nullability** — `NOT NULL` columns are non-nullable; everything else is `T | null`.
+- **Correct nullability** — `NOT NULL` columns are non-nullable; conservative expression/view outputs stay `T | null`, with safe inference for obvious `COALESCE(..., non_null_literal)` outputs and simple view column passthroughs.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
 - **Real PostgreSQL introspection** — supports server-version features and installed extensions.
 - **Schema from a file or dbmate-style migrations** — no dump required.
@@ -59,7 +59,8 @@ RETURNING id, email, created_at;
   "connection": "postgres://postgres:postgres@localhost:5432/genpg",
   "schema": "db/schema.sql",
   "queries": "db/queries/**/*.sql",
-  "out": "src/db/queries.ts"
+  "out": "src/db/queries.ts",
+  "caseStyle": "camel"
 }
 ```
 
@@ -69,6 +70,11 @@ dedicated empty database: existing objects can conflict with replayed migrations
 and migrations containing transaction control or commands such as `CREATE DATABASE`
 are not supported. The programmatic `generateFromConfig` API requires the explicit
 config value.
+
+`caseStyle` defaults to `"preserve"`, which keeps SQL names like `full_name` in
+the TypeScript API. Set `"caseStyle": "camel"` to expose params, spread-row
+fields, and result rows as `fullName` / `workspaceId` while still reading the
+original Postgres column names at runtime.
 
 **4. Generate:**
 
@@ -80,7 +86,7 @@ npx genpg
 
 ```ts
 import { Pool } from "pg";
-import { getUser, createUser } from "./db/queries.ts";
+import { bind, getUser, createUser } from "./db/queries.ts";
 
 const pool = new Pool();
 
@@ -90,6 +96,10 @@ const user = await getUser(pool, { id: 1n.toString() });
 //                               status: "active" | "suspended" | "closed" }
 
 const created = await createUser(pool, { email: "a@b.com", full_name: "Ada" });
+
+// Or bind a db handle once for a smaller callsite.
+const queries = bind(pool);
+const sameUser = await queries.getUser({ id: "1" });
 ```
 
 ## Query annotations
@@ -217,6 +227,19 @@ await withTransaction(pool, async (tx) => {
   const user = await createUser(tx, { email, full_name });
   await updateStatus(tx, { id: user.id, status: "active" });
 }); // COMMIT on success, ROLLBACK on throw
+```
+
+The generated `bind(db)` helper follows the same rule: bind the transaction
+handle inside the transaction scope.
+
+```ts
+import { bind } from "./db/queries.ts";
+
+await withTransaction(pool, async (tx) => {
+  const queries = bind(tx);
+  const user = await queries.createUser({ email, full_name });
+  await queries.updateStatus({ id: user.id, status: "active" });
+});
 ```
 
 ```ts

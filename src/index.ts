@@ -11,7 +11,7 @@ import { generateModule } from "./codegen.ts";
 import type { AnalyzedQuery } from "./model.ts";
 import type { TypeInfo } from "./typemap.ts";
 
-export type { GenpgConfig, ResolvedConfig, OverrideValue } from "./config.ts";
+export type { CaseStyle, GenpgConfig, ResolvedConfig, OverrideValue } from "./config.ts";
 export type { ParsedQuery, QueryCommand } from "./sqlfile.ts";
 export type { RewrittenQuery } from "./params.ts";
 export type { AnalyzedQuery, QueryColumn, QueryShape } from "./model.ts";
@@ -60,6 +60,7 @@ export async function generate(config: ResolvedConfig): Promise<GenerateResult> 
       parsers: config.typeParsers,
       serializers: config.typeSerializers,
       runtime: config.typeRuntime,
+      caseStyle: config.caseStyle,
     });
     await mkdir(dirname(config.out), { recursive: true });
     await writeFile(config.out, code, "utf8");

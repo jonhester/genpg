@@ -87,6 +87,71 @@ dbTest("end-to-end introspection + codegen against PostgreSQL", async () => {
   }
 });
 
+dbTest("infers obvious non-null COALESCE output from query expressions and views", async () => {
+  const suffix = process.pid;
+  const workspaces = `genpg_nullability_workspaces_${suffix}`;
+  const bucketTypes = `genpg_nullability_bucket_types_${suffix}`;
+  const buckets = `genpg_nullability_buckets_${suffix}`;
+  const view = `genpg_nullability_view_${suffix}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${workspaces} (
+          id int PRIMARY KEY,
+          note text
+        );
+
+        CREATE TABLE ${bucketTypes} (
+          code text PRIMARY KEY,
+          name text NOT NULL
+        );
+
+        CREATE TABLE ${buckets} (
+          workspace_id int NOT NULL REFERENCES ${workspaces}(id),
+          bucket_type text NOT NULL REFERENCES ${bucketTypes}(code),
+          planned_cents bigint
+        );
+
+        CREATE VIEW ${view} AS
+        SELECT
+          w.id AS workspace_id,
+          bt.code AS bucket_type,
+          bt.name,
+          COALESCE(wb.planned_cents, 0) AS planned_cents,
+          wb.planned_cents AS raw_planned_cents,
+          w.note
+        FROM ${workspaces} w
+        CROSS JOIN ${bucketTypes} bt
+        LEFT JOIN ${buckets} wb
+          ON wb.workspace_id = w.id AND wb.bucket_type = bt.code;
+      `,
+      queries: parseQueryFile(`
+        -- name: FromExpression :one
+        SELECT COALESCE(planned_cents, 0) AS planned_cents, planned_cents FROM ${buckets};
+
+        -- name: FromView :one
+        SELECT workspace_id, bucket_type, name, planned_cents, raw_planned_cents, note FROM ${view};
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+
+    expect(code).toContain("export interface FromExpressionRow {\n  planned_cents: string;");
+    expect(code).toContain("export interface FromViewRow {");
+    expect(code).toContain("workspace_id: number;");
+    expect(code).toContain("bucket_type: string;");
+    expect(code).toContain("name: string;");
+    expect(code).toContain("planned_cents: string;");
+    expect(code).toContain("raw_planned_cents: string | null;");
+    expect(code).toContain("note: string | null;");
+  } finally {
+    await engine.dispose();
+  }
+});
+
 dbTest("type overrides apply by real Postgres type name (Temporal)", async () => {
   const engine = await PgEngine.create(connection!);
   try {
@@ -161,13 +226,13 @@ SELECT id, created FROM events WHERE created >= @since;
 
 dbTest("generated hydration + serialization round-trips through PostgreSQL", async () => {
   // Override `text` so values are upper-cased on read and lower-cased on write.
-  const schema = `CREATE TABLE t (id int PRIMARY KEY, name text NOT NULL);`;
+  const schema = `CREATE TABLE t (id int PRIMARY KEY, full_name text NOT NULL);`;
   const queries = `
 -- name: Insert :one
-INSERT INTO t (id, name) VALUES (@id, @name) RETURNING id, name;
+INSERT INTO t (id, full_name) VALUES (@id, @full_name) RETURNING id, full_name;
 
 -- name: Get :one
-SELECT id, name FROM t WHERE id = @id;
+SELECT id, full_name FROM t WHERE id = @id;
 `;
 
   const engine = await PgEngine.create(connection!);
@@ -184,6 +249,7 @@ SELECT id, name FROM t WHERE id = @id;
       overrides: new Map([["text", "string"]]),
       parsers: new Map([["text", "(value) => value.toUpperCase()"]]),
       serializers: new Map([["text", "(value) => value.toLowerCase()"]]),
+      caseStyle: "camel",
     });
   } finally {
     await engine.dispose();
@@ -202,11 +268,13 @@ SELECT id, name FROM t WHERE id = @id;
   try {
     const mod: any = await import(file.href);
     // "Hello" -> serialized to "hello" on insert -> hydrated to "HELLO" on return.
-    const inserted = await mod.insert(db, { id: 1, name: "Hello" });
-    expect(inserted.name).toBe("HELLO");
+    const inserted = await mod.insert(db, { id: 1, fullName: "Hello" });
+    expect(inserted.fullName).toBe("HELLO");
+    expect(inserted.full_name).toBeUndefined();
     // Stored value is the lower-cased "hello"; read hydrates it back to "HELLO".
     const got = await mod.get(db, { id: 1 });
-    expect(got.name).toBe("HELLO");
+    expect(got.fullName).toBe("HELLO");
+    expect(got.full_name).toBeUndefined();
   } finally {
     await db.query("ROLLBACK");
     await db.end();
