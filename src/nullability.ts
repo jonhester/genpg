@@ -17,9 +17,29 @@ export function inferNonNullOutputColumns(sql: string): Set<number> {
   return out;
 }
 
+/**
+ * Query-local inference that deliberately only recognizes COALESCE fallbacks.
+ * This is safe to run on user query text because it does not chase source-column
+ * lineage or recurse through arbitrary expression trees.
+ */
+export function inferCoalesceFallbackOutputColumns(sql: string): Set<number> {
+  const out = new Set<number>();
+  if (!/\bcoalesce\s*\(/i.test(sql) || sql.length > 50_000) return out;
+
+  selectExpressions(sql).forEach((expr, idx) => {
+    if (hasNonNullCoalesceFallback(expr)) out.add(idx);
+  });
+  return out;
+}
+
 export interface ExpressionInferenceOptions {
   isNonNullColumn?: (ref: ColumnRef) => boolean;
   depth?: number;
+}
+
+function hasNonNullCoalesceFallback(expr: string): boolean {
+  const args = callArgs(stripOuterCasts(stripOuterParens(expr.trim())), "coalesce");
+  return args?.some((arg) => isNonNullLiteral(arg)) === true;
 }
 
 /** True when a standalone SQL expression is visibly non-null. */

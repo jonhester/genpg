@@ -2,6 +2,7 @@ import { expect, test } from "vite-plus/test";
 import {
   fromAliases,
   columnRefsInExpression,
+  inferCoalesceFallbackOutputColumns,
   inferNonNullExpression,
   inferNonNullOutputColumns,
   selectExpressions,
@@ -18,6 +19,17 @@ test("infers COALESCE with a non-null literal output as not null", () => {
   `);
 
   expect([...inferred]).toEqual([1]);
+});
+
+test("infers query-level COALESCE aggregate fallback as not null", () => {
+  const inferred = inferCoalesceFallbackOutputColumns(`
+    SELECT
+      COALESCE(SUM(e.normalized_monthly_take_home_cents), 0)::bigint AS total_income_cents,
+      SUM(e.normalized_monthly_take_home_cents)::bigint AS maybe_total
+    FROM income_source_expectations e
+  `);
+
+  expect([...inferred]).toEqual([0]);
 });
 
 test("infers standalone generated-column expressions", () => {

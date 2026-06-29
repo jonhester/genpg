@@ -12,6 +12,7 @@ import type { IntrospectionEngine } from "./engine.ts";
 import {
   columnRefsInExpression,
   fromAliases,
+  inferCoalesceFallbackOutputColumns,
   inferNonNullExpression,
   selectExpressions,
 } from "./nullability.ts";
@@ -76,7 +77,7 @@ export async function analyzeQueries(opts: AnalyzeOptions): Promise<AnalyzeResul
 }
 
 function inferQueryNotNullColumns(
-  _sql: string,
+  sql: string,
   manualNames: string[] | undefined,
   shape: Awaited<ReturnType<IntrospectionEngine["describe"]>>,
 ): Set<number> {
@@ -84,7 +85,7 @@ function inferQueryNotNullColumns(
   // including view lineage, is handled later in loadNotNull from Postgres
   // metadata. This pass only applies explicit user assertions; parsing arbitrary
   // query SQL here can wedge on real-world query text.
-  const out = new Set<number>();
+  const out = inferCoalesceFallbackOutputColumns(sql);
   if (!manualNames?.length || !shape.columns?.length) return out;
 
   const manual = new Set(manualNames);
