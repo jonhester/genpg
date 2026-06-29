@@ -220,6 +220,36 @@ npx genpg && git diff --exit-code src/db/queries.ts
 
 If a query or the schema changed without regenerating, the `git diff` fails the build.
 
+Because genpg introspects a live database, CI needs a reachable PostgreSQL server
+(match the major version you run in production). On GitHub Actions, add a service
+container and point `DATABASE_URL` at it:
+
+```yaml
+jobs:
+  codegen:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: genpg
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/genpg
+    steps:
+      - uses: actions/checkout@v4
+      # ... install deps ...
+      - run: npx genpg && git diff --exit-code src/db/queries.ts
+```
+
 ## Drivers
 
 Generated functions take a minimal `Queryable` (`{ query(text, values) }`).

@@ -152,6 +152,140 @@ dbTest("infers obvious non-null COALESCE output from query expressions and views
   }
 });
 
+dbTest("infers nullability through a materialized view", async () => {
+  const suffix = process.pid;
+  const base = `genpg_matview_base_${suffix}`;
+  const opt = `genpg_matview_opt_${suffix}`;
+  const mview = `genpg_matview_${suffix}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${base} (
+          id    int PRIMARY KEY,
+          label text NOT NULL
+        );
+        CREATE TABLE ${opt} (
+          base_id int NOT NULL REFERENCES ${base}(id),
+          note    text NOT NULL
+        );
+        CREATE MATERIALIZED VIEW ${mview} AS
+        SELECT b.id AS id, b.label AS label, o.note AS note
+        FROM ${base} b
+        LEFT JOIN ${opt} o ON o.base_id = b.id;
+      `,
+      queries: parseQueryFile(`
+        -- name: FromMatview :many
+        SELECT id, label, note FROM ${mview} ORDER BY id;
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+    // relkind 'm' is inferred the same way as a plain view (pg_get_viewdef).
+    expect(code).toContain("id: number;"); // NOT NULL passthrough
+    expect(code).toContain("label: string;"); // NOT NULL passthrough
+    expect(code).toContain("note: string | null;"); // LEFT-join side -> nullable
+  } finally {
+    await engine.dispose();
+  }
+});
+
+dbTest("stays conservative through a nested view (view of a view)", async () => {
+  const suffix = process.pid;
+  const base = `genpg_nested_base_${suffix}`;
+  const inner = `genpg_nested_inner_${suffix}`;
+  const outer = `genpg_nested_outer_${suffix}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${base} (
+          id    int PRIMARY KEY,
+          label text NOT NULL
+        );
+        CREATE VIEW ${inner} AS
+        SELECT b.id AS id, b.label AS label, b.label || '!' AS shout
+        FROM ${base} b;
+        CREATE VIEW ${outer} AS
+        SELECT i.id AS id, i.label AS label, i.shout AS shout
+        FROM ${inner} i;
+      `,
+      queries: parseQueryFile(`
+        -- name: FromNested :many
+        SELECT id, label, shout FROM ${outer} ORDER BY id;
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+    // The outer view's columns come from the INNER view, whose attnotnull is
+    // always false; lineage is not chased through nested views, so they stay
+    // nullable even though the base columns are NOT NULL. Conservative + safe.
+    expect(code).toContain("export interface FromNestedRow {");
+    expect(code).toContain("id: number | null;");
+    expect(code).toContain("label: string | null;");
+    expect(code).toContain("shout: string | null;");
+  } finally {
+    await engine.dispose();
+  }
+});
+
+dbTest("propagates RIGHT/FULL JOIN nullability in a view", async () => {
+  const suffix = process.pid;
+  const left = `genpg_rj_left_${suffix}`;
+  const right = `genpg_rj_right_${suffix}`;
+  const rview = `genpg_rj_right_view_${suffix}`;
+  const fview = `genpg_rj_full_view_${suffix}`;
+  const engine = await PgEngine.create(connection!);
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      schema: `
+        CREATE TABLE ${left} (
+          id    int PRIMARY KEY,
+          lname text NOT NULL
+        );
+        CREATE TABLE ${right} (
+          id      int PRIMARY KEY,
+          left_id int,
+          rname   text NOT NULL
+        );
+        CREATE VIEW ${rview} AS
+        SELECT l.lname AS lname, r.rname AS rname
+        FROM ${left} l
+        RIGHT JOIN ${right} r ON r.left_id = l.id;
+        CREATE VIEW ${fview} AS
+        SELECT l.lname AS lname, r.rname AS rname
+        FROM ${left} l
+        FULL JOIN ${right} r ON r.left_id = l.id;
+      `,
+      queries: parseQueryFile(`
+        -- name: FromRightView :many
+        SELECT lname, rname FROM ${rview};
+
+        -- name: FromFullView :many
+        SELECT lname, rname FROM ${fview};
+      `),
+    });
+
+    expect(errors).toEqual([]);
+    const code = generateModule(analyzed, { typeInfo, notNull });
+    // RIGHT JOIN: the left side becomes nullable, the preserved right side stays non-null.
+    expect(code).toContain(
+      "export interface FromRightViewRow {\n  lname: string | null;\n  rname: string;\n}",
+    );
+    // FULL JOIN: both sides become nullable.
+    expect(code).toContain(
+      "export interface FromFullViewRow {\n  lname: string | null;\n  rname: string | null;\n}",
+    );
+  } finally {
+    await engine.dispose();
+  }
+});
+
 dbTest("infers obvious non-null generated column expressions", async () => {
   const table = `genpg_generated_nullability_${process.pid}`;
   const engine = await PgEngine.create(connection!);
@@ -186,7 +320,7 @@ dbTest("infers obvious non-null generated column expressions", async () => {
   }
 });
 
-dbTest("supports manual nonnull directives and strict expression inference", async () => {
+dbTest("keeps direct-query expressions conservative but honors -- nonnull:", async () => {
   const table = `genpg_expression_nullability_${process.pid}`;
   const engine = await PgEngine.create(connection!);
   try {
@@ -217,9 +351,14 @@ dbTest("supports manual nonnull directives and strict expression inference", asy
 
     expect(errors).toEqual([]);
     const code = generateModule(analyzed, { typeInfo, notNull });
-    expect(code).toContain("display_name: string;");
+    // Expressions in a direct query stay conservative (nullable) even when their
+    // operands are NOT NULL: inferQueryNotNullColumns deliberately does not parse
+    // arbitrary query select-lists. (View/generated-column lineage is inferred
+    // separately; see the view + generated-column tests above.)
+    expect(code).toContain("display_name: string | null;");
     expect(code).toContain("maybe_name: string | null;");
-    expect(code).toContain("created_month: Date;");
+    expect(code).toContain("created_month: Date | null;");
+    // The explicit `-- nonnull:` directive is the escape hatch that forces non-null.
     expect(code).toContain("export interface ManualNonnullRow {\n  nickname: string;");
   } finally {
     await engine.dispose();

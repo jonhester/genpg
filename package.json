@@ -1,6 +1,6 @@
 {
   "name": "genpg",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Generate type-safe TypeScript from SQL queries for PostgreSQL (sqlc-style, live introspection).",
   "license": "MIT",
   "author": "Jon Hester",
@@ -34,6 +34,7 @@
     "@types/node": "^25.6.2",
     "@types/pg": "^8.20.0",
     "@typescript/native-preview": "7.0.0-dev.20260509.2",
+    "postgres": "^3.4.7",
     "typescript": "^6.0.3",
     "vite-plus": "catalog:"
   },
