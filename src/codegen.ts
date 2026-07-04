@@ -41,6 +41,8 @@ export interface Queryable {
 }`;
 
 export function generateModule(analyzed: AnalyzedQuery[], ctx: CodegenContext): string {
+  validateGeneratedNames(analyzed);
+
   const blocks = [HEADER];
   if (ctx.imports && ctx.imports.length > 0) {
     blocks.push(ctx.imports.join("\n"));
@@ -408,12 +410,27 @@ function paramTsType(p: QueryParam, shape: QueryShape, ctx: CodegenContext): str
 /** A value expression for a scalar, wrapped with a serializer when configured. */
 function scalarValueExpr(access: string, oid: number, ctx: CodegenContext): string {
   const ser = scalarSerializer(oid, ctx);
-  return ser ? `${access} == null ? null : ${ser}(${access})` : access;
+  if (!ser) return access;
+  if (ser.kind === "array") {
+    return `${access} == null ? null : ${access}.map((e) => (e == null ? null : ${ser.fn}(e)))`;
+  }
+  return `${access} == null ? null : ${ser.fn}(${access})`;
 }
 
-function scalarSerializer(oid: number, ctx: CodegenContext): string | null {
+function scalarSerializer(
+  oid: number,
+  ctx: CodegenContext,
+): { kind: "scalar" | "array"; fn: string } | null {
   const t = ctx.typeInfo.types.get(oid);
-  return t && serializes(t.name, ctx) ? serializerConstName(t.name) : null;
+  if (!t) return null;
+  if (serializes(t.name, ctx)) return { kind: "scalar", fn: serializerConstName(t.name) };
+  if (t.typcategory === "A" && t.typelem) {
+    const el = ctx.typeInfo.types.get(t.typelem);
+    if (el && serializes(el.name, ctx)) {
+      return { kind: "array", fn: serializerConstName(el.name) };
+    }
+  }
+  return null;
 }
 
 function columnType(
@@ -458,3 +475,89 @@ function rowAccess(obj: string, name: string): string {
 function escapeTemplate(sql: string): string {
   return sql.replace(/\\/g, "\\\\").replace(/`/g, "\\`").replace(/\$\{/g, "\\${");
 }
+
+function validateGeneratedNames(analyzed: AnalyzedQuery[]): void {
+  const used = new Map<string, string>();
+
+  for (const a of analyzed) {
+    const source = `query "${a.query.name}"`;
+    const pascal = pascalCase(a.query.name);
+    const camel = camelCase(a.query.name);
+    const identifiers: [string, string][] = [[camel, `${source} function`]];
+    if (!a.rewritten.dynamic) identifiers.push([`${camel}Sql`, `${source} SQL constant`]);
+    if (a.rewritten.params.length > 0) identifiers.push([`${pascal}Args`, `${source} args type`]);
+    if (a.query.command === "one" || a.query.command === "many") {
+      identifiers.push([`${pascal}Row`, `${source} row type`]);
+    }
+
+    for (const [identifier, label] of identifiers) {
+      assertTsIdentifier(identifier, label);
+      const previous = used.get(identifier);
+      if (previous) {
+        throw new Error(
+          `Generated identifier "${identifier}" for ${label} collides with ${previous}. ` +
+            `Rename one of the queries.`,
+        );
+      }
+      used.set(identifier, label);
+    }
+  }
+}
+
+function assertTsIdentifier(identifier: string, label: string): void {
+  if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(identifier) || RESERVED_TS_WORDS.has(identifier)) {
+    throw new Error(
+      `Generated identifier "${identifier}" for ${label} is not a valid TypeScript identifier. ` +
+        `Rename the query.`,
+    );
+  }
+}
+
+const RESERVED_TS_WORDS = new Set([
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "import",
+  "in",
+  "instanceof",
+  "new",
+  "null",
+  "return",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "as",
+  "implements",
+  "interface",
+  "let",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "static",
+  "yield",
+]);

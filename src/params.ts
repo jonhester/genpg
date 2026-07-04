@@ -144,6 +144,23 @@ export function rewriteNamedParams(sql: string): RewrittenQuery {
             param.fields = fields;
           }
           params.push(param);
+        } else {
+          const existing = params[idx];
+          const nullable = marker === "?";
+          if (existing.kind !== kind || existing.nullable !== nullable) {
+            throw new Error(
+              `Parameter @${name} is used with inconsistent markers; ` +
+                `reuse one spelling such as @${name}, @${name}?, @${name}(array), or @${name}(spread).`,
+            );
+          }
+          if (kind === "spread") {
+            const fields = spreadFields.get(name);
+            if (!sameFields(existing.fields ?? [], fields ?? [])) {
+              throw new Error(
+                `Spread parameter @${name}(spread) is used with inconsistent fields.`,
+              );
+            }
+          }
         }
 
         pushLiteral();
@@ -171,6 +188,10 @@ export function rewriteNamedParams(sql: string): RewrittenQuery {
   return { segments, params, introspectText, dynamic };
 }
 
+function sameFields(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((field, idx) => field === b[idx]);
+}
+
 /** Render the `$1..$n` text used for Parse/Describe (arrays/spreads -> one tuple). */
 function renderIntrospectText(segments: SqlSegment[], params: QueryParam[]): string {
   let out = "";
@@ -195,7 +216,12 @@ function extractSpreadFields(sql: string): Map<string, string[]> {
       .split(",")
       .map((c) => c.trim().replace(/^"(.*)"$/, "$1"))
       .filter(Boolean);
-    map.set(m[2], cols);
+    const name = m[2];
+    const existing = map.get(name);
+    if (existing && !sameFields(existing, cols)) {
+      throw new Error(`Spread parameter @${name}(spread) is used with inconsistent fields.`);
+    }
+    map.set(name, cols);
   }
   return map;
 }

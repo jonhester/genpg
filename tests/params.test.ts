@@ -19,6 +19,11 @@ test("repeated names reuse the same position", () => {
   expect(r.params.map((p) => p.name)).toEqual(["id", "other"]);
 });
 
+test("repeated names must use consistent markers", () => {
+  expect(() => rewriteNamedParams("SELECT @id WHERE a = @id?")).toThrow(/inconsistent/);
+  expect(() => rewriteNamedParams("SELECT @ids(array), @ids")).toThrow(/inconsistent/);
+});
+
 test("does not touch @ inside string literals or comments", () => {
   const r = rewriteNamedParams("-- @nope\nSELECT '@x' AS a, @real /* @also */");
   expect(r.introspectText).toBe("-- @nope\nSELECT '@x' AS a, $1 /* @also */");

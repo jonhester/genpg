@@ -68,6 +68,13 @@ export async function generate(
       progress,
     });
 
+    progress?.("checking override warnings");
+    const warnings = collectOverrideWarnings(analyzed, typeInfo, config);
+    if (errors.length > 0) {
+      progress?.("skipping output because one or more queries failed to analyze");
+      return { code: "", count: analyzed.length, errors, warnings };
+    }
+
     progress?.(
       `generating TypeScript for ${analyzed.length} quer${analyzed.length === 1 ? "y" : "ies"}`,
     );
@@ -85,8 +92,6 @@ export async function generate(
     await mkdir(dirname(config.out), { recursive: true });
     await writeFile(config.out, code, "utf8");
 
-    progress?.("checking override warnings");
-    const warnings = collectOverrideWarnings(analyzed, typeInfo, config);
     return { code, count: analyzed.length, errors, warnings };
   } finally {
     progress?.("closing PostgreSQL connection");

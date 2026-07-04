@@ -92,6 +92,56 @@ test("applies type overrides and emits import lines", () => {
   expect(code).toContain("id: number;"); // non-overridden param unaffected
 });
 
+test("serializes scalar array params element-wise for ANY-style queries", () => {
+  const typeInfo = emptyTypeInfo();
+  typeInfo.types.set(1184, {
+    oid: 1184,
+    name: "timestamptz",
+    typtype: "b",
+    typcategory: "D",
+    typelem: 0,
+    typbasetype: 0,
+  });
+  typeInfo.types.set(1185, {
+    oid: 1185,
+    name: "_timestamptz",
+    typtype: "b",
+    typcategory: "A",
+    typelem: 1184,
+    typbasetype: 0,
+  });
+
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "SinceAny",
+        command: "many",
+        sql: "SELECT id FROM events WHERE created = ANY(@since)",
+      },
+      rewritten: staticRewritten("SELECT id FROM events WHERE created = ANY($1)", [
+        scalarParam("since", 1),
+      ]),
+      shape: {
+        params: [1185],
+        columns: [{ name: "id", tableOid: 100, columnAttr: 1, typeOid: 23 }],
+      },
+    },
+  ];
+
+  const code = generateModule(analyzed, {
+    typeInfo,
+    notNull: new Map([[attrKey(100, 1), true]]),
+    overrides: new Map([["timestamptz", "Temporal.Instant"]]),
+    serializers: new Map([["timestamptz", "(value) => value.toString()"]]),
+  });
+
+  expect(code).toContain("since: Temporal.Instant[];");
+  expect(code).toContain("const __ser_timestamptz = (value) => value.toString();");
+  expect(code).toContain(
+    "args.since == null ? null : args.since.map((e) => (e == null ? null : __ser_timestamptz(e)))",
+  );
+});
+
 test("uses inferred expression nullability for result columns", () => {
   const analyzed: AnalyzedQuery[] = [
     {
@@ -168,4 +218,29 @@ test("generates :exec and :execrows without a row interface", () => {
   expect(code).toContain("deleteUser: (args: DeleteUserArgs) => deleteUser(db, args)");
   expect(code).toContain("touch: () => touch(db)");
   expect(code).toContain("return result.rowCount ?? 0;");
+});
+
+test("rejects invalid or colliding generated query identifiers", () => {
+  const validShape = {
+    params: [],
+    columns: [{ name: "id", tableOid: 100, columnAttr: 1, typeOid: 23 }],
+  };
+  const first: AnalyzedQuery = {
+    query: { name: "ListUsers", command: "many", sql: "SELECT id FROM users" },
+    rewritten: staticRewritten("SELECT id FROM users", []),
+    shape: validShape,
+  };
+  const second: AnalyzedQuery = {
+    query: { name: "list_users", command: "many", sql: "SELECT id FROM users" },
+    rewritten: staticRewritten("SELECT id FROM users", []),
+    shape: validShape,
+  };
+  const invalid: AnalyzedQuery = {
+    query: { name: "123", command: "many", sql: "SELECT id FROM users" },
+    rewritten: staticRewritten("SELECT id FROM users", []),
+    shape: validShape,
+  };
+
+  expect(() => generateModule([first, second], ctx())).toThrow(/collides/);
+  expect(() => generateModule([invalid], ctx())).toThrow(/valid TypeScript identifier/);
 });

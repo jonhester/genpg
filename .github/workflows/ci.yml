@@ -57,3 +57,38 @@ jobs:
             git push origin "$VERSION"
             echo "Created and pushed tag $VERSION"
           fi
+
+  publish-github-package:
+    needs: ci
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: "24"
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@jonhester"
+      - run: vp install
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          PACKAGE="@jonhester/genpg"
+
+          if npm view "$PACKAGE@$VERSION" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+            echo "$PACKAGE@$VERSION already exists in GitHub Packages, skipping."
+            exit 0
+          fi
+
+          npm pkg set name="$PACKAGE" publishConfig.registry="https://npm.pkg.github.com"
+          vp pack
+          npm publish --registry=https://npm.pkg.github.com

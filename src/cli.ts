@@ -65,9 +65,6 @@ async function main(argv: string[]): Promise<number> {
   const config = await loadConfig(configPath);
   const result = await generate(config, { progress });
 
-  process.stdout.write(
-    `Generated ${result.count} quer${result.count === 1 ? "y" : "ies"} -> ${config.out}\n`,
-  );
   if (result.warnings.length > 0) {
     process.stderr.write(`\n${result.warnings.length} warning(s):\n`);
     for (const w of result.warnings) {
@@ -81,6 +78,9 @@ async function main(argv: string[]): Promise<number> {
     }
     return 1;
   }
+  process.stdout.write(
+    `Generated ${result.count} quer${result.count === 1 ? "y" : "ies"} -> ${config.out}\n`,
+  );
   return 0;
 }
 

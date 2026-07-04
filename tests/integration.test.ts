@@ -1,5 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { Client } from "pg";
 import { PgEngine } from "../src/engine.ts";
@@ -637,5 +637,41 @@ SELECT * FROM table_that_does_not_exist;
     expect(progress).toContain("loading PostgreSQL type catalog");
   } finally {
     await engine.dispose();
+  }
+});
+
+dbTest("does not write output when any query fails to analyze", async () => {
+  const dir = new URL("./__tmp__/errors/", import.meta.url);
+  await mkdir(dir, { recursive: true });
+  await writeFile(new URL("schema.sql", dir), SCHEMA);
+  await writeFile(
+    new URL("q.sql", dir),
+    `
+-- name: Good :many
+SELECT id FROM users;
+
+-- name: Bad :many
+SELECT * FROM table_that_does_not_exist;
+`,
+  );
+  await writeFile(new URL("out.ts", dir), "sentinel");
+
+  try {
+    const result = await generateFromConfig(
+      {
+        connection: connection!,
+        schema: "schema.sql",
+        queries: "q.sql",
+        out: "out.ts",
+      },
+      fileURLToPath(dir),
+    );
+
+    expect(result.count).toBe(1);
+    expect(result.errors.length).toBe(1);
+    expect(result.code).toBe("");
+    expect(await readFile(new URL("out.ts", dir), "utf8")).toBe("sentinel");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 });
