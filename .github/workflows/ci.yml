@@ -83,12 +83,13 @@ jobs:
         run: |
           VERSION="$(node -p "require('./package.json').version")"
           PACKAGE="@jonhester/genpg"
+          export PACKAGE
 
-          if npm view "$PACKAGE@$VERSION" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
+          if pnpm view "$PACKAGE@$VERSION" version --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
             echo "$PACKAGE@$VERSION already exists in GitHub Packages, skipping."
             exit 0
           fi
 
-          npm pkg set name="$PACKAGE" publishConfig.registry="https://npm.pkg.github.com"
+          node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); pkg.name = process.env.PACKAGE; pkg.publishConfig = { ...pkg.publishConfig, registry: 'https://npm.pkg.github.com' }; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
           vp pack
-          npm publish --registry=https://npm.pkg.github.com
+          pnpm publish --registry=https://npm.pkg.github.com --access public --no-git-checks
