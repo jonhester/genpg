@@ -12,6 +12,7 @@ extensions, and type behavior match the database that will execute the queries.
 - **Accurate types** — types come from Postgres itself (Parse/Describe), not a SQL parser, so joins, expressions, functions, enums, arrays, and domains all resolve correctly.
 - **Correct nullability** — `NOT NULL` columns are non-nullable; conservative expression/view outputs stay `T | null`, with safe inference for common non-null expressions, simple view column passthroughs, generated-column expressions, and explicit `-- nonnull:` overrides.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
+- **Editor-friendly output** — generated functions include JSDoc with the original SQL, so hover/definition views show the query you wrote.
 - **Real PostgreSQL introspection** — supports server-version features and installed extensions.
 - **Schema from a file or dbmate-style migrations** — no dump required.
 - **Driver-agnostic output** — generated code targets a tiny `Queryable` interface; works directly with `pg`, or via an adapter with `postgres.js`.
@@ -70,6 +71,23 @@ dedicated empty database: existing objects can conflict with replayed migrations
 and migrations containing transaction control or commands such as `CREATE DATABASE`
 are not supported. The programmatic `generateFromConfig` API requires the explicit
 config value.
+
+Leading comments after `-- name:` become JSDoc on the generated function. Use
+`@deprecated` in those comments to mark the generated function as deprecated:
+
+```sql
+-- name: GetUser :one
+-- Fetch a user by id.
+-- @deprecated Use GetUserByEmail for new call sites.
+SELECT id, email, full_name FROM users WHERE id = @id;
+
+-- name: ListUsers :many
+/*
+ * List users in creation order.
+ * Supports dashboard summary views.
+ */
+SELECT id, email FROM users ORDER BY created_at DESC;
+```
 
 `caseStyle` defaults to `"preserve"`, which keeps SQL names like `full_name` in
 the TypeScript API. Set `"caseStyle": "camel"` to expose params, spread-row

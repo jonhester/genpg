@@ -6,7 +6,7 @@ import { PgEngine } from "../src/engine.ts";
 import { analyzeQueries } from "../src/introspect.ts";
 import { parseQueryFile } from "../src/sqlfile.ts";
 import { generateModule } from "../src/codegen.ts";
-import { fromPostgresJs, type Queryable } from "../src/runtime.ts";
+import { fromPostgresJs, withPostgresJsTransaction, type Queryable } from "../src/runtime.ts";
 
 const connection = process.env.TEST_DATABASE_URL;
 const dbTest = test.skipIf(!connection);
@@ -124,5 +124,105 @@ dbTest("generated queries run identically through pg and postgres.js", async () 
     await admin.query(`DROP TABLE IF EXISTS ${table}`);
     await admin.end();
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+dbTest("runtime converters round-trip through postgres.js", async () => {
+  const convertTable = `genpg_pgjs_converters_${process.pid}`;
+  const convertSchema = `CREATE TABLE ${convertTable} (
+    id        int PRIMARY KEY,
+    full_name text NOT NULL
+  );`;
+  const convertQueries = `
+-- name: Insert :one
+INSERT INTO ${convertTable} (id, full_name) VALUES (@id, @full_name) RETURNING id, full_name;
+
+-- name: Get :one
+SELECT id, full_name FROM ${convertTable} WHERE id = @id;
+`;
+
+  const engine = await PgEngine.create(connection!);
+  let code: string;
+  try {
+    const { analyzed, typeInfo, notNull, errors } = await analyzeQueries({
+      engine,
+      queries: parseQueryFile(convertQueries),
+      schema: convertSchema,
+    });
+    expect(errors).toEqual([]);
+    code = generateModule(analyzed, {
+      typeInfo,
+      notNull,
+      overrides: new Map([["text", "string"]]),
+      parsers: new Map([["text", "(value) => value.toUpperCase()"]]),
+      serializers: new Map([["text", "(value) => value.toLowerCase()"]]),
+      caseStyle: "camel",
+    });
+  } finally {
+    await engine.dispose();
+  }
+
+  const dir = new URL("./__tmp__/drivers/", import.meta.url);
+  await mkdir(dir, { recursive: true });
+  const file = new URL(`convert_${Date.now()}_${Math.random().toString(36).slice(2)}.ts`, dir);
+  await writeFile(file, code);
+  const mod: any = await import(file.href);
+
+  const admin = new Client({ connectionString: connection });
+  await admin.connect();
+  await admin.query(`DROP TABLE IF EXISTS ${convertTable}`);
+  await admin.query(convertSchema);
+  const sql = postgres(connection!, { max: 1 });
+
+  try {
+    const db = fromPostgresJs(sql);
+    const inserted = await mod.insert(db, { id: 1, fullName: "Hello" });
+    expect(inserted.fullName).toBe("HELLO");
+    expect(inserted.full_name).toBeUndefined();
+
+    const stored = await admin.query(`SELECT full_name FROM ${convertTable} WHERE id = $1`, [1]);
+    expect(stored.rows[0]?.full_name).toBe("hello");
+
+    const got = await mod.get(db, { id: 1 });
+    expect(got.fullName).toBe("HELLO");
+    expect(got.full_name).toBeUndefined();
+  } finally {
+    await sql.end({ timeout: 5 });
+    await admin.query(`DROP TABLE IF EXISTS ${convertTable}`);
+    await admin.end();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+dbTest("withPostgresJsTransaction commits and rolls back against real postgres.js", async () => {
+  const txTable = `genpg_pgjs_tx_${process.pid}`;
+  const admin = new Client({ connectionString: connection });
+  await admin.connect();
+  await admin.query(`DROP TABLE IF EXISTS ${txTable}`);
+  await admin.query(`CREATE TABLE ${txTable} (id int PRIMARY KEY, label text NOT NULL)`);
+
+  const sql = postgres(connection!, { max: 1 });
+
+  try {
+    await withPostgresJsTransaction(sql, async (tx) => {
+      await tx.query(`INSERT INTO ${txTable} (id, label) VALUES ($1, $2)`, [1, "committed"]);
+    });
+
+    let rows = await admin.query(`SELECT id, label FROM ${txTable} ORDER BY id`);
+    expect(rows.rows).toEqual([{ id: 1, label: "committed" }]);
+
+    await expect(
+      withPostgresJsTransaction(sql, async (tx) => {
+        await tx.query(`INSERT INTO ${txTable} (id, label) VALUES ($1, $2)`, [2, "rolled back"]);
+        throw new Error("force rollback");
+      }),
+    ).rejects.toThrow("force rollback");
+
+    rows = await admin.query(`SELECT id, label FROM ${txTable} ORDER BY id`);
+    expect(rows.rows).toEqual([{ id: 1, label: "committed" }]);
+  } finally {
+    await sql.end({ timeout: 5 });
+    await admin.query(`DROP TABLE IF EXISTS ${txTable}`);
+    await admin.end();
   }
 });

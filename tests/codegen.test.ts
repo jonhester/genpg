@@ -43,6 +43,21 @@ test("generates a :one function with args and a row interface", () => {
   ];
 
   const code = generateModule(analyzed, ctx());
+  expect(code).toContain("/** Parameters for `getUser`. */\nexport interface GetUserArgs");
+  expect(code).toContain("/** Result row returned by `getUser`. */\nexport interface GetUserRow");
+  expect(code).toContain(
+    [
+      "/**",
+      " * Generated from `GetUser :one`.",
+      " * ",
+      " * ```sql",
+      " * SELECT id, nickname FROM users WHERE id = @id",
+      " * ```",
+      " */",
+      "export async function getUser",
+    ].join("\n"),
+  );
+  expect(code).not.toContain("SELECT id, nickname FROM users WHERE id = $1\n * ```");
   expect(code).toContain("export interface GetUserArgs {\n  id: number;\n}");
   expect(code).toContain("export interface GetUserRow {");
   expect(code).toContain("id: number;"); // NOT NULL -> no | null
@@ -243,4 +258,66 @@ test("rejects invalid or colliding generated query identifiers", () => {
 
   expect(() => generateModule([first, second], ctx())).toThrow(/collides/);
   expect(() => generateModule([invalid], ctx())).toThrow(/valid TypeScript identifier/);
+});
+
+test("escapes generated query documentation comments", () => {
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "Documented",
+        command: "many",
+        sql: "SELECT '*/' AS value",
+      },
+      rewritten: staticRewritten("SELECT '*/' AS value", []),
+      shape: {
+        params: [],
+        columns: [{ name: "value", tableOid: 0, columnAttr: 0, typeOid: 25 }],
+      },
+    },
+  ];
+
+  const code = generateModule(analyzed, ctx());
+  expect(code).toContain(" * SELECT '*\\/' AS value");
+  expect(code).toContain(
+    "export async function documented(db: Queryable): Promise<DocumentedRow[]>",
+  );
+});
+
+test("emits SQL docs and deprecation reason in generated function JSDoc", () => {
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "OldList",
+        command: "many",
+        docs: ["List old rows.", "", "Use the paginated query for new call sites."],
+        deprecated: "Use ListRowsPage instead.",
+        sql: "SELECT id FROM rows ORDER BY id",
+      },
+      rewritten: staticRewritten("SELECT id FROM rows ORDER BY id", []),
+      shape: {
+        params: [],
+        columns: [{ name: "id", tableOid: 100, columnAttr: 1, typeOid: 23 }],
+      },
+    },
+  ];
+
+  const code = generateModule(analyzed, ctx());
+  expect(code).toContain(
+    [
+      "/**",
+      " * List old rows.",
+      " * ",
+      " * Use the paginated query for new call sites.",
+      " * ",
+      " * Generated from `OldList :many`.",
+      " * ",
+      " * ```sql",
+      " * SELECT id FROM rows ORDER BY id",
+      " * ```",
+      " * ",
+      " * @deprecated Use ListRowsPage instead.",
+      " */",
+      "export async function oldList",
+    ].join("\n"),
+  );
 });

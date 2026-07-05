@@ -137,7 +137,7 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     const fields = params
       .map((p) => `  ${propName(tsFieldName(p.name, ctx))}: ${paramTsType(p, a.shape, ctx)};`)
       .join("\n");
-    out.push(`export interface ${argsType} {\n${fields}\n}`);
+    out.push(`/** Parameters for \`${camel}\`. */\nexport interface ${argsType} {\n${fields}\n}`);
   }
 
   let rowType = "";
@@ -148,7 +148,9 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     const fields = cols
       .map((c, idx) => `  ${propName(tsFieldName(c.name, ctx))}: ${columnType(c, idx, a, ctx)};`)
       .join("\n");
-    out.push(`export interface ${rowType} {\n${fields || ""}\n}`);
+    out.push(
+      `/** Result row returned by \`${camel}\`. */\nexport interface ${rowType} {\n${fields || ""}\n}`,
+    );
 
     const built = renderHydrator(pascal, rowType, cols, ctx);
     if (built) {
@@ -164,8 +166,34 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     ? renderDynamicBody(a, ctx, returnLine)
     : renderStaticBody(a, ctx, sqlConst, returnLine);
 
-  out.push(`export async function ${camel}(${sig}): ${ret} {\n${body}\n}`);
+  out.push(`${renderFunctionDoc(a)}\nexport async function ${camel}(${sig}): ${ret} {\n${body}\n}`);
   return out.join("\n\n");
+}
+
+function renderFunctionDoc(a: AnalyzedQuery): string {
+  const lines = [];
+  if (a.query.docs?.length) {
+    lines.push(...a.query.docs, "");
+  }
+  lines.push(
+    `Generated from \`${a.query.name} :${a.query.command}\`.`,
+    "",
+    "```sql",
+    ...a.query.sql.split(/\r?\n/),
+    "```",
+  );
+  if (a.query.deprecated) {
+    lines.push("", `@deprecated ${a.query.deprecated}`);
+  }
+  return renderDocComment(lines);
+}
+
+function renderDocComment(lines: string[]): string {
+  return ["/**", ...lines.map((line) => ` * ${escapeDocComment(line)}`), " */"].join("\n");
+}
+
+function escapeDocComment(line: string): string {
+  return line.replace(/\*\//g, "*\\/");
 }
 
 function renderBind(analyzed: AnalyzedQuery[]): string {
