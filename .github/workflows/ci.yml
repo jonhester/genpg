@@ -35,9 +35,47 @@ jobs:
       - run: vp test
       - run: vp pack
 
-  tag:
+  version-bump:
     needs: ci
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      changed: ${{ steps.version.outputs.changed }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: version
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v$VERSION"
+          CHANGED="false"
+          BASE="${{ github.event.before }}"
+
+          if [ -n "$BASE" ] && [ "$BASE" != "0000000000000000000000000000000000000000" ] && git cat-file -e "$BASE:package.json" 2>/dev/null; then
+            BEFORE="$(git show "$BASE:package.json" | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+            if [ "$BEFORE" != "$VERSION" ]; then
+              CHANGED="true"
+            fi
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            BEFORE="$(git show HEAD^:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")"
+            if [ "$BEFORE" != "$VERSION" ]; then
+              CHANGED="true"
+            fi
+          else
+            CHANGED="true"
+          fi
+
+          echo "changed=$CHANGED" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Version changed: $CHANGED ($TAG)"
+
+  tag:
+    needs: version-bump
+    if: needs.version-bump.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -47,7 +85,7 @@ jobs:
           fetch-depth: 0
       - name: Tag on version bump
         run: |
-          VERSION="v$(node -p "require('./package.json').version")"
+          VERSION="${{ needs.version-bump.outputs.tag }}"
           if git rev-parse "$VERSION" >/dev/null 2>&1; then
             echo "Tag $VERSION already exists — no version bump, skipping."
           else
@@ -59,8 +97,8 @@ jobs:
           fi
 
   publish-github-package:
-    needs: ci
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: version-bump
+    if: needs.version-bump.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,7 +119,7 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          VERSION="$(node -p "require('./package.json').version")"
+          VERSION="${{ needs.version-bump.outputs.version }}"
           PACKAGE="@jonhester/genpg"
           export PACKAGE
 

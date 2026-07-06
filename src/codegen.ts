@@ -3,7 +3,13 @@
 import type { AnalyzedQuery, QueryColumn, QueryShape } from "./model.ts";
 import type { QueryParam, SqlSegment } from "./params.ts";
 import { camelCase, pascalCase } from "./naming.ts";
-import { attrKey, tsForOid, type TypeInfo, type TypeOverrides } from "./typemap.ts";
+import {
+  attrKey,
+  tsForOid,
+  typeNamesForOid,
+  type TypeInfo,
+  type TypeOverrides,
+} from "./typemap.ts";
 import type { CaseStyle } from "./config.ts";
 
 export interface CodegenContext {
@@ -83,16 +89,14 @@ function renderConverterConsts(analyzed: AnalyzedQuery[], ctx: CodegenContext): 
   for (const a of analyzed) {
     if (a.query.command === "one" || a.query.command === "many") {
       for (const col of a.shape.columns ?? []) {
-        for (const name of typeNamesForOid(col.typeOid, ctx.typeInfo)) {
-          if (hydrates(name, ctx)) parseUsed.add(name);
-        }
+        const conv = columnConverter(col, ctx);
+        if (conv) parseUsed.add(conv.name);
       }
     }
     for (const p of a.rewritten.params) {
       for (const oid of paramOids(p, a.shape)) {
-        for (const name of typeNamesForOid(oid, ctx.typeInfo)) {
-          if (serializes(name, ctx)) serializeUsed.add(name);
-        }
+        const ser = scalarSerializer(oid, ctx);
+        if (ser) serializeUsed.add(ser.name);
       }
     }
   }
@@ -104,18 +108,6 @@ function renderConverterConsts(analyzed: AnalyzedQuery[], ctx: CodegenContext): 
     ),
   ];
   return lines.length ? lines.join("\n") : null;
-}
-
-/** A type name plus, for arrays, its element type name. */
-function typeNamesForOid(oid: number, info: TypeInfo): string[] {
-  const t = info.types.get(oid);
-  if (!t) return [];
-  const names = [t.name];
-  if (t.typcategory === "A" && t.typelem) {
-    const el = info.types.get(t.typelem);
-    if (el) names.push(el.name);
-  }
-  return names;
 }
 
 function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
@@ -285,13 +277,17 @@ function columnConverter(
   col: QueryColumn,
   ctx: CodegenContext,
 ): { kind: "scalar" | "array"; name: string } | null {
-  const t = ctx.typeInfo.types.get(col.typeOid);
-  if (!t) return null;
-  if (hydrates(t.name, ctx)) return { kind: "scalar", name: t.name };
-  if (t.typcategory === "A" && t.typelem) {
-    const el = ctx.typeInfo.types.get(t.typelem);
-    if (el && hydrates(el.name, ctx)) return { kind: "array", name: el.name };
+  const resolved = resolveDomain(col.typeOid, ctx.typeInfo);
+  if (!resolved) return null;
+  const own = ctx.typeInfo.types.get(col.typeOid)?.name;
+  if (own && hydrates(own, ctx)) return { kind: "scalar", name: own };
+  if (own && ctx.overrides?.has(own)) return null;
+  if (resolved.type.typcategory === "A" && resolved.type.typelem) {
+    const elem = converterNameForOid(resolved.type.typelem, ctx, hydrates);
+    if (elem) return { kind: "array", name: elem };
   }
+  const scalar = converterNameForOid(col.typeOid, ctx, hydrates);
+  if (scalar) return { kind: "scalar", name: scalar };
   return null;
 }
 
@@ -448,17 +444,47 @@ function scalarValueExpr(access: string, oid: number, ctx: CodegenContext): stri
 function scalarSerializer(
   oid: number,
   ctx: CodegenContext,
-): { kind: "scalar" | "array"; fn: string } | null {
-  const t = ctx.typeInfo.types.get(oid);
-  if (!t) return null;
-  if (serializes(t.name, ctx)) return { kind: "scalar", fn: serializerConstName(t.name) };
-  if (t.typcategory === "A" && t.typelem) {
-    const el = ctx.typeInfo.types.get(t.typelem);
-    if (el && serializes(el.name, ctx)) {
-      return { kind: "array", fn: serializerConstName(el.name) };
+): { kind: "scalar" | "array"; name: string; fn: string } | null {
+  const resolved = resolveDomain(oid, ctx.typeInfo);
+  if (!resolved) return null;
+  const own = ctx.typeInfo.types.get(oid)?.name;
+  if (own && serializes(own, ctx)) {
+    return { kind: "scalar", name: own, fn: serializerConstName(own) };
+  }
+  if (own && ctx.overrides?.has(own)) return null;
+  if (resolved.type.typcategory === "A" && resolved.type.typelem) {
+    const elem = converterNameForOid(resolved.type.typelem, ctx, serializes);
+    if (elem) {
+      return { kind: "array", name: elem, fn: serializerConstName(elem) };
     }
   }
+  const scalar = converterNameForOid(oid, ctx, serializes);
+  if (scalar) return { kind: "scalar", name: scalar, fn: serializerConstName(scalar) };
   return null;
+}
+
+function converterNameForOid(
+  oid: number,
+  ctx: CodegenContext,
+  hasConverter: (name: string, ctx: CodegenContext) => boolean,
+): string | undefined {
+  for (const name of typeNamesForOid(oid, ctx.typeInfo)) {
+    if (hasConverter(name, ctx)) return name;
+    if (ctx.overrides?.has(name)) return undefined;
+  }
+  return undefined;
+}
+
+function resolveDomain(
+  oid: number,
+  info: TypeInfo,
+  depth = 0,
+): { oid: number; type: NonNullable<ReturnType<TypeInfo["types"]["get"]>> } | null {
+  if (oid === 0 || depth > 16) return null;
+  const t = info.types.get(oid);
+  if (!t) return null;
+  if (t.typtype === "d" && t.typbasetype) return resolveDomain(t.typbasetype, info, depth + 1);
+  return { oid, type: t };
 }
 
 function columnType(

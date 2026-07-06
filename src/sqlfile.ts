@@ -96,14 +96,23 @@ export function parseQueryFile(content: string, file = "<input>"): ParsedQuery[]
     if (current) {
       if (current.sqlTerminated) {
         if (outsideBlockComment) {
-          if (line.includes("*/")) outsideBlockComment = false;
+          const end = line.indexOf("*/");
+          if (end >= 0) {
+            outsideBlockComment = false;
+            if (line.slice(end + 2).trim()) throw unannotatedSqlError(file, lineNo);
+          }
           continue;
         }
 
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith("--")) continue;
         if (trimmed.startsWith("/*")) {
-          outsideBlockComment = !trimmed.includes("*/");
+          const end = trimmed.indexOf("*/");
+          if (end >= 0) {
+            if (trimmed.slice(end + 2).trim()) throw unannotatedSqlError(file, lineNo);
+          } else {
+            outsideBlockComment = true;
+          }
           continue;
         }
         throw unannotatedSqlError(file, lineNo);
@@ -167,14 +176,23 @@ export function parseQueryFile(content: string, file = "<input>"): ParsedQuery[]
     }
 
     if (outsideBlockComment) {
-      if (line.includes("*/")) outsideBlockComment = false;
+      const end = line.indexOf("*/");
+      if (end >= 0) {
+        outsideBlockComment = false;
+        if (line.slice(end + 2).trim()) throw unannotatedSqlError(file, lineNo);
+      }
       continue;
     }
 
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith("--")) continue;
     if (trimmed.startsWith("/*")) {
-      outsideBlockComment = !trimmed.includes("*/");
+      const end = trimmed.indexOf("*/");
+      if (end >= 0) {
+        if (trimmed.slice(end + 2).trim()) throw unannotatedSqlError(file, lineNo);
+      } else {
+        outsideBlockComment = true;
+      }
       continue;
     }
     throw unannotatedSqlError(file, lineNo);

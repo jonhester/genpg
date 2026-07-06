@@ -125,6 +125,30 @@ export function tsForOid(
   return "unknown";
 }
 
+/**
+ * Type names consulted for override/converter lookup, in precedence order.
+ * Direct names come first, then array elements and domain base types recursively.
+ */
+export function typeNamesForOid(oid: number, info: TypeInfo, depth = 0): string[] {
+  if (oid === 0 || depth > 16) return [];
+  const t = info.types.get(oid);
+  if (!t) return [];
+
+  const names = [t.name];
+  const next =
+    t.typcategory === "A" && t.typelem
+      ? t.typelem
+      : t.typtype === "d" && t.typbasetype
+        ? t.typbasetype
+        : 0;
+  if (next) {
+    for (const name of typeNamesForOid(next, info, depth + 1)) {
+      if (!names.includes(name)) names.push(name);
+    }
+  }
+  return names;
+}
+
 /** Stable key for a (table oid, column attnum) pair used by the nullability map. */
 export function attrKey(tableOid: number, columnAttr: number): string {
   return `${tableOid}:${columnAttr}`;

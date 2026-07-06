@@ -610,6 +610,43 @@ dbTest("warns about overrides that will break at runtime, unless runtime is none
   }
 });
 
+dbTest("override warnings follow domains to their base type", async () => {
+  const dir = new URL("./__tmp__/warn-domain/", import.meta.url);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    new URL("schema.sql", dir),
+    `
+CREATE DOMAIN created_at AS timestamptz;
+CREATE TABLE e (id int PRIMARY KEY, at created_at NOT NULL);
+`,
+  );
+  await writeFile(
+    new URL("q.sql", dir),
+    "-- name: AtLeast :many\nSELECT id, at FROM e WHERE at >= @since;",
+  );
+  const base = fileURLToPath(dir);
+
+  try {
+    const result = await generateFromConfig(
+      {
+        connection: connection!,
+        schema: "schema.sql",
+        queries: "q.sql",
+        out: "out.ts",
+        overrides: { timestamptz: "X" },
+      },
+      base,
+    );
+    expect(result.warnings.length).toBe(2);
+    const joined = result.warnings.join("\n");
+    expect(joined).toContain("timestamptz");
+    expect(joined).toContain("parse");
+    expect(joined).toContain("serialize");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 dbTest("reports per-query errors without aborting the rest", async () => {
   const engine = await PgEngine.create(connection!);
   try {

@@ -9,7 +9,7 @@ import { PgEngine } from "./engine.ts";
 import { analyzeQueries } from "./introspect.ts";
 import { generateModule } from "./codegen.ts";
 import type { AnalyzedQuery } from "./model.ts";
-import type { TypeInfo } from "./typemap.ts";
+import { typeNamesForOid, type TypeInfo } from "./typemap.ts";
 
 export type { CaseStyle, GenpgConfig, ResolvedConfig, OverrideValue } from "./config.ts";
 export type { ParsedQuery, QueryCommand } from "./sqlfile.ts";
@@ -111,25 +111,15 @@ function collectOverrideWarnings(
 ): string[] {
   const usedAsResult = new Set<string>();
   const usedAsParam = new Set<string>();
-  const names = (oid: number): string[] => {
-    const t = typeInfo.types.get(oid);
-    if (!t) return [];
-    const out = [t.name];
-    if (t.typcategory === "A" && t.typelem) {
-      const el = typeInfo.types.get(t.typelem);
-      if (el) out.push(el.name);
-    }
-    return out;
-  };
 
   for (const a of analyzed) {
     if (a.query.command === "one" || a.query.command === "many") {
       for (const col of a.shape.columns ?? [])
-        for (const n of names(col.typeOid)) usedAsResult.add(n);
+        for (const n of typeNamesForOid(col.typeOid, typeInfo)) usedAsResult.add(n);
     }
     for (const p of a.rewritten.params) {
       for (const ph of p.placeholders) {
-        for (const n of names(a.shape.params[ph - 1] ?? 0)) usedAsParam.add(n);
+        for (const n of typeNamesForOid(a.shape.params[ph - 1] ?? 0, typeInfo)) usedAsParam.add(n);
       }
     }
   }

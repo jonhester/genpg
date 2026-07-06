@@ -1,5 +1,5 @@
 import { expect, test } from "vite-plus/test";
-import { tsForOid, emptyTypeInfo, type TypeInfo } from "../src/typemap.ts";
+import { tsForOid, typeNamesForOid, emptyTypeInfo, type TypeInfo } from "../src/typemap.ts";
 
 test("maps common builtin scalars", () => {
   const info = emptyTypeInfo();
@@ -51,6 +51,37 @@ test("resolves domains to their base type", () => {
     typbasetype: 25,
   });
   expect(tsForOid(50001, info)).toBe("string");
+});
+
+test("lists type names through arrays and domains in override precedence order", () => {
+  const info: TypeInfo = emptyTypeInfo();
+  info.types.set(1184, {
+    oid: 1184,
+    name: "timestamptz",
+    typtype: "b",
+    typcategory: "D",
+    typelem: 0,
+    typbasetype: 0,
+  });
+  info.types.set(50001, {
+    oid: 50001,
+    name: "created_at",
+    typtype: "d",
+    typcategory: "D",
+    typelem: 0,
+    typbasetype: 1184,
+  });
+  info.types.set(50002, {
+    oid: 50002,
+    name: "_created_at",
+    typtype: "b",
+    typcategory: "A",
+    typelem: 50001,
+    typbasetype: 0,
+  });
+
+  expect(typeNamesForOid(50001, info)).toEqual(["created_at", "timestamptz"]);
+  expect(typeNamesForOid(50002, info)).toEqual(["_created_at", "created_at", "timestamptz"]);
 });
 
 test("name overrides win and apply recursively through arrays", () => {

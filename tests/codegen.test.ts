@@ -157,6 +157,104 @@ test("serializes scalar array params element-wise for ANY-style queries", () => 
   );
 });
 
+test("runtime converters apply through domains with domain overrides taking precedence", () => {
+  const typeInfo = emptyTypeInfo();
+  typeInfo.types.set(1184, {
+    oid: 1184,
+    name: "timestamptz",
+    typtype: "b",
+    typcategory: "D",
+    typelem: 0,
+    typbasetype: 0,
+  });
+  typeInfo.types.set(50001, {
+    oid: 50001,
+    name: "created_at",
+    typtype: "d",
+    typcategory: "D",
+    typelem: 0,
+    typbasetype: 1184,
+  });
+
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "Since",
+        command: "many",
+        sql: "SELECT created FROM events WHERE created >= @since",
+      },
+      rewritten: staticRewritten("SELECT created FROM events WHERE created >= $1", [
+        scalarParam("since", 1),
+      ]),
+      shape: {
+        params: [50001],
+        columns: [{ name: "created", tableOid: 100, columnAttr: 1, typeOid: 50001 }],
+      },
+    },
+  ];
+
+  const baseOverride = generateModule(analyzed, {
+    typeInfo,
+    notNull: new Map([[attrKey(100, 1), true]]),
+    overrides: new Map([["timestamptz", "Temporal.Instant"]]),
+    parsers: new Map([["timestamptz", "(value) => value.toTemporalInstant()"]]),
+    serializers: new Map([["timestamptz", "(value) => value.toString()"]]),
+  });
+
+  expect(baseOverride).toContain("created: Temporal.Instant;");
+  expect(baseOverride).toContain(
+    "const __parse_timestamptz = (value) => value.toTemporalInstant();",
+  );
+  expect(baseOverride).toContain(
+    "created: r.created == null ? null : __parse_timestamptz(r.created),",
+  );
+  expect(baseOverride).toContain(
+    "await db.query(sinceSql, [args.since == null ? null : __ser_timestamptz(args.since)])",
+  );
+
+  const domainOverride = generateModule(analyzed, {
+    typeInfo,
+    notNull: new Map([[attrKey(100, 1), true]]),
+    overrides: new Map([
+      ["timestamptz", "Temporal.Instant"],
+      ["created_at", "CreatedAt"],
+    ]),
+    parsers: new Map([
+      ["timestamptz", "(value) => value.toTemporalInstant()"],
+      ["created_at", "(value) => CreatedAt.parse(value)"],
+    ]),
+    serializers: new Map([
+      ["timestamptz", "(value) => value.toString()"],
+      ["created_at", "(value) => value.toDate()"],
+    ]),
+  });
+
+  expect(domainOverride).toContain("created: CreatedAt;");
+  expect(domainOverride).toContain("const __parse_created_at = (value) => CreatedAt.parse(value);");
+  expect(domainOverride).not.toContain("const __parse_timestamptz");
+  expect(domainOverride).toContain(
+    "created: r.created == null ? null : __parse_created_at(r.created),",
+  );
+  expect(domainOverride).toContain(
+    "await db.query(sinceSql, [args.since == null ? null : __ser_created_at(args.since)])",
+  );
+
+  const domainTypeOnly = generateModule(analyzed, {
+    typeInfo,
+    notNull: new Map([[attrKey(100, 1), true]]),
+    overrides: new Map([
+      ["timestamptz", "Temporal.Instant"],
+      ["created_at", "CreatedAt"],
+    ]),
+    parsers: new Map([["timestamptz", "(value) => value.toTemporalInstant()"]]),
+    serializers: new Map([["timestamptz", "(value) => value.toString()"]]),
+  });
+
+  expect(domainTypeOnly).toContain("created: CreatedAt;");
+  expect(domainTypeOnly).not.toContain("__parse_timestamptz");
+  expect(domainTypeOnly).not.toContain("__ser_timestamptz");
+});
+
 test("uses inferred expression nullability for result columns", () => {
   const analyzed: AnalyzedQuery[] = [
     {

@@ -83,6 +83,17 @@ test("rejects SQL before a name annotation", () => {
   expect(() => parseQueryFile("SELECT 1;", "queries.sql")).toThrow(
     /queries\.sql:1: SQL query is missing/,
   );
+  expect(() => parseQueryFile("/* comment */ SELECT 1;", "queries.sql")).toThrow(
+    /queries\.sql:1: SQL query is missing/,
+  );
+  expect(() =>
+    parseQueryFile(
+      `/*
+comment
+*/ SELECT 1;`,
+      "queries.sql",
+    ),
+  ).toThrow(/queries\.sql:3: SQL query is missing/);
 });
 
 test("rejects another SQL statement after a completed annotated query", () => {
@@ -91,6 +102,14 @@ test("rejects another SQL statement after a completed annotated query", () => {
       `-- name: A :one
 SELECT 1;
 SELECT 2;`,
+      "queries.sql",
+    ),
+  ).toThrow(/queries\.sql:3: SQL query is missing/);
+  expect(() =>
+    parseQueryFile(
+      `-- name: A :one
+SELECT 1;
+/* comment */ SELECT 2;`,
       "queries.sql",
     ),
   ).toThrow(/queries\.sql:3: SQL query is missing/);
