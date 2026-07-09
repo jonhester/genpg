@@ -96,13 +96,12 @@ jobs:
             echo "Created and pushed tag $VERSION"
           fi
 
-  publish-github-package:
+  publish-npm:
     needs: version-bump
     if: needs.version-bump.outputs.changed == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: voidzero-dev/setup-vp@v1
@@ -112,22 +111,19 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
-          registry-url: "https://npm.pkg.github.com"
-          scope: "@jonhester"
+          registry-url: "https://registry.npmjs.org"
       - run: vp install
-      - name: Publish to GitHub Packages
+      - name: Publish to npm
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           VERSION="${{ needs.version-bump.outputs.version }}"
-          PACKAGE="@jonhester/genpg"
-          export PACKAGE
+          PACKAGE="genpg"
 
-          if vp pm view "$PACKAGE@$VERSION" version -- --registry=https://npm.pkg.github.com >/dev/null 2>&1; then
-            echo "$PACKAGE@$VERSION already exists in GitHub Packages, skipping."
+          if vp pm view "$PACKAGE@$VERSION" version >/dev/null 2>&1; then
+            echo "$PACKAGE@$VERSION already exists on npm, skipping."
             exit 0
           fi
 
-          node -e "const fs = require('fs'); const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8')); pkg.name = process.env.PACKAGE; pkg.publishConfig = { ...pkg.publishConfig, registry: 'https://npm.pkg.github.com' }; fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');"
           vp pack
-          vp pm publish -- --registry=https://npm.pkg.github.com --access public --no-git-checks
+          vp pm publish -- --access public --no-git-checks
