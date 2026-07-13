@@ -57,7 +57,7 @@ export async function generate(
   progress?.("loading schema SQL");
   const schema = await resolveSchema(config);
   progress?.("connecting to PostgreSQL");
-  const engine = await PgEngine.create(config.connection);
+  const engine = await PgEngine.create(config.connection, { readOnly: schema === undefined });
 
   try {
     progress?.("starting introspection");

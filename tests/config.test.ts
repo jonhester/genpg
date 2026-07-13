@@ -49,6 +49,35 @@ test("rejects unknown caseStyle", async () => {
   ).rejects.toThrow('caseStyle` must be "preserve" or "camel"');
 });
 
+test("allows omitting schema and migrations (introspect existing database)", async () => {
+  const config = await resolveConfig(
+    {
+      connection: "postgres://postgres:postgres@localhost:5432/genpg",
+      queries: "db/queries.sql",
+      out: "src/generated.ts",
+    },
+    "/project",
+  );
+
+  expect(config.schemaFile).toBeUndefined();
+  expect(config.migrationsDir).toBeUndefined();
+});
+
+test("rejects setting both schema and migrations", async () => {
+  await expect(
+    resolveConfig(
+      {
+        connection: "postgres://postgres:postgres@localhost:5432/genpg",
+        schema: "schema.sql",
+        migrations: "db/migrations",
+        queries: "queries.sql",
+        out: "generated.ts",
+      },
+      "/project",
+    ),
+  ).rejects.toThrow("Specify only one of `schema` or `migrations`.");
+});
+
 test("requires a PostgreSQL connection", async () => {
   await expect(
     resolveConfig(

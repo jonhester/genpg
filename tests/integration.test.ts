@@ -562,6 +562,72 @@ SELECT id, name FROM items WHERE id IN @ids(array) ORDER BY id;
   }
 });
 
+dbTest("introspects an existing database when no schema source is configured", async () => {
+  const table = `genpg_existing_db_${process.pid}`;
+
+  // Create a real (committed) table so it is visible to a fresh connection.
+  const setup = new Client({ connectionString: connection });
+  await setup.connect();
+  await setup.query(`CREATE TABLE ${table} (id int PRIMARY KEY, email text NOT NULL, note text)`);
+  await setup.end();
+
+  const dir = new URL("./__tmp__/existing/", import.meta.url);
+  await mkdir(dir, { recursive: true });
+  await writeFile(
+    new URL("q.sql", dir),
+    `-- name: GetRow :one\nSELECT id, email, note FROM ${table} WHERE id = @id;`,
+  );
+
+  try {
+    const result = await generateFromConfig(
+      {
+        connection: connection!,
+        queries: "q.sql",
+        out: "out.ts",
+      },
+      fileURLToPath(dir),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.count).toBe(1);
+    expect(result.code).toContain("export interface GetRowRow {");
+    expect(result.code).toContain("id: number;");
+    expect(result.code).toContain("email: string;");
+    expect(result.code).toContain("note: string | null;");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    const teardown = new Client({ connectionString: connection });
+    await teardown.connect();
+    await teardown.query(`DROP TABLE IF EXISTS ${table}`);
+    await teardown.end();
+  }
+});
+
+dbTest("read-only engine rejects DDL but still describes queries", async () => {
+  const engine = await PgEngine.create(connection!, { readOnly: true });
+  try {
+    await expect(
+      engine.applySchema("CREATE TABLE genpg_readonly_should_fail (id int)"),
+    ).rejects.toThrow(/read-only/);
+  } finally {
+    await engine.dispose();
+  }
+
+  // Describe (Parse/Describe, no execution) works fine in a read-only transaction,
+  // even for a data-modifying statement — read-only is only enforced at execution.
+  const engine2 = await PgEngine.create(connection!, { readOnly: true });
+  try {
+    const shape = await engine2.describe("SELECT 1::int AS one");
+    expect(shape.columns?.map((c) => c.name)).toEqual(["one"]);
+    const insertShape = await engine2.describe(
+      "INSERT INTO pg_description (objoid, classoid, objsubid, description) VALUES ($1, $2, $3, $4)",
+    );
+    expect(insertShape.params.length).toBe(4);
+  } finally {
+    await engine2.dispose();
+  }
+});
+
 dbTest("warns about overrides that will break at runtime, unless runtime is none", async () => {
   const dir = new URL("./__tmp__/warn/", import.meta.url);
   await mkdir(dir, { recursive: true });

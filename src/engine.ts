@@ -31,6 +31,14 @@ interface RowDescription {
   fields: FieldDef[];
 }
 
+export interface PgEngineOptions {
+  /**
+   * Open the transaction as READ ONLY. Used when introspecting an existing
+   * database without a schema to replay, so genpg can never mutate it.
+   */
+  readOnly?: boolean;
+}
+
 /**
  * A real PostgreSQL engine. Schema replay and catalog inspection share one
  * transaction, which is always rolled back when generation finishes.
@@ -38,11 +46,11 @@ interface RowDescription {
 export class PgEngine implements IntrospectionEngine {
   private constructor(private readonly client: Client) {}
 
-  static async create(connectionString: string): Promise<PgEngine> {
+  static async create(connectionString: string, options: PgEngineOptions = {}): Promise<PgEngine> {
     const client = new Client({ connectionString, application_name: "genpg" });
     await client.connect();
     try {
-      await client.query("BEGIN");
+      await client.query(options.readOnly ? "BEGIN READ ONLY" : "BEGIN");
       return new PgEngine(client);
     } catch (error) {
       await client.end();

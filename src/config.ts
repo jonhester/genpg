@@ -7,7 +7,10 @@ import { dirname, isAbsolute, resolve } from "node:path";
 export interface GenpgConfig {
   /** Dedicated PostgreSQL connection URL. The CLI also accepts DATABASE_URL. */
   connection?: string;
-  /** Path to a schema .sql file. Mutually exclusive with `migrations`. */
+  /**
+   * Path to a schema .sql file. Mutually exclusive with `migrations`. When neither
+   * is set, the connected database is introspected as-is (read-only).
+   */
   schema?: string;
   /** Path to a dbmate-style migrations directory. Mutually exclusive with `schema`. */
   migrations?: string;
@@ -96,9 +99,6 @@ export async function resolveConfig(raw: GenpgConfig, baseDir: string): Promise<
 
   const schemaFile = raw.schema ? resolve(baseDir, raw.schema) : undefined;
   const migrationsDir = raw.migrations ? resolve(baseDir, raw.migrations) : undefined;
-  if (!schemaFile && !migrationsDir) {
-    throw new Error("Config needs the schema to build from. Set `schema` or `migrations`.");
-  }
 
   const patterns = Array.isArray(raw.queries) ? raw.queries : [raw.queries];
   const queryFiles = await expandQueries(patterns, baseDir);

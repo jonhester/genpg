@@ -14,7 +14,7 @@ extensions, and type behavior match the database that will execute the queries.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
 - **Editor-friendly output** — generated functions include JSDoc with the original SQL, so hover/definition views show the query you wrote.
 - **Real PostgreSQL introspection** — supports server-version features and installed extensions.
-- **Schema from a file or dbmate-style migrations** — no dump required.
+- **Schema from a file, dbmate-style migrations, or a live database** — replay a schema file/migrations, or point at an existing database and introspect it as-is.
 - **Driver-agnostic output** — generated code targets a tiny `Queryable` interface; works directly with `pg`, or via an adapter with `postgres.js`.
 
 ## Install
@@ -66,11 +66,13 @@ RETURNING id, email, created_at;
 ```
 
 The CLI also reads `DATABASE_URL` when `connection` is omitted. Genpg applies the
-schema and performs all introspection in one transaction, then rolls it back. Use a
-dedicated empty database: existing objects can conflict with replayed migrations,
-and migrations containing transaction control or commands such as `CREATE DATABASE`
-are not supported. The programmatic `generateFromConfig` API requires the explicit
-config value.
+schema and performs all introspection in one transaction, then rolls it back. When
+replaying a schema or migrations, use a dedicated empty database: existing objects
+can conflict with replayed migrations, and migrations containing transaction control
+or commands such as `CREATE DATABASE` are not supported. Alternatively, omit
+`schema`/`migrations` entirely and point `connection` at an already-migrated
+database — genpg then introspects it as-is in a read-only transaction. The
+programmatic `generateFromConfig` API requires the explicit config value.
 
 Leading comments after `-- name:` become JSDoc on the generated function. Use
 `@deprecated` in those comments to mark the generated function as deprecated:
@@ -210,7 +212,7 @@ await bulkCreateUsers(db, { rows: [{ email, full_name }, …] });
 // arg type: { rows: { email: string; full_name: string }[] }
 ```
 
-## Schema source: file or migrations
+## Schema source: file, migrations, or an existing database
 
 Use a single schema file:
 
@@ -227,6 +229,28 @@ dump needed — the `-- migrate:up` blocks are applied in filename order):
 
 Your schema/migrations are applied on every run. The work is wrapped in a transaction
 and rolled back after introspection.
+
+…or set **neither** and point `connection` at a database that already has the
+schema (e.g. your dev database, migrated by your usual tooling):
+
+```json
+{ "queries": "db/queries/**/*.sql", "out": "src/db/queries.ts" }
+```
+
+In this mode genpg never runs DDL — the whole session is a `READ ONLY` transaction,
+so it is safe to point at a database you care about. Queries are never executed
+either way (introspection uses Parse/Describe only).
+
+Since genpg needs no write access here, the connection only requires read
+privileges: `SELECT` on the tables/views your queries touch (system catalogs are
+readable by default). For defense in depth, use a read-only role rather than
+relying on the transaction mode alone:
+
+```sql
+CREATE ROLE genpg LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA public TO genpg;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO genpg;
+```
 
 ## Use it in CI
 
