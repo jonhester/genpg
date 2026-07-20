@@ -12,7 +12,7 @@ extensions, and type behavior match the database that will execute the queries.
 - **Accurate types** — types come from Postgres itself (Parse/Describe), not a SQL parser, so joins, expressions, functions, enums, arrays, and domains all resolve correctly.
 - **Correct nullability** — `NOT NULL` columns are non-nullable; conservative expression/view outputs stay `T | null`, with safe inference for common non-null expressions, simple view column passthroughs, generated-column expressions, and explicit `-- nonnull:` overrides.
 - **Named parameters** — write `@id`, get a typed `{ id: ... }` args object. Repeated names reuse one positional placeholder.
-- **Editor-friendly output** — generated functions include JSDoc with the original SQL, so hover/definition views show the query you wrote.
+- **Editor-friendly output** — generated functions, their `Args`/`Row` types, and the `bind()` helper all carry JSDoc with the query's SQL, so hover shows what you wrote at every call site.
 - **Real PostgreSQL introspection** — supports server-version features and installed extensions.
 - **Schema from a file, dbmate-style migrations, or a live database** — replay a schema file/migrations, or point at an existing database and introspect it as-is.
 - **Driver-agnostic output** — generated code targets a tiny `Queryable` interface; works directly with `pg`, or via an adapter with `postgres.js`.
@@ -75,7 +75,8 @@ database — genpg then introspects it as-is in a read-only transaction. The
 programmatic `generateFromConfig` API requires the explicit config value.
 
 Leading comments after `-- name:` become JSDoc on the generated function. Use
-`@deprecated` in those comments to mark the generated function as deprecated:
+`@deprecated` in those comments to mark the generated function, its `Args` and
+`Row` types, and its `BoundQueries` member as deprecated:
 
 ```sql
 -- name: GetUser :one
@@ -90,6 +91,13 @@ SELECT id, email, full_name FROM users WHERE id = @id;
  */
 SELECT id, email FROM users ORDER BY created_at DESC;
 ```
+
+The SQL echoed in that JSDoc renders each parameter as a `${name}` slot rather
+than `@name` — so `WHERE id = @id` shows as `WHERE id = ${id}` on hover. This is
+deliberate: TypeScript parses a whitespace-preceded `@` inside a doc comment as a
+JSDoc tag, even within a fenced code block, which would truncate the query at its
+first parameter. The slot names follow `caseStyle`, so they match the keys you
+actually pass in the args object.
 
 `caseStyle` defaults to `"preserve"`, which keeps SQL names like `full_name` in
 the TypeScript API. Set `"caseStyle": "camel"` to expose params, spread-row
@@ -127,6 +135,18 @@ const created = await createUser(pool, { email: "a@b.com", full_name: "Ada" });
 // Or bind a db handle once for a smaller callsite.
 const queries = bind(pool);
 const sameUser = await queries.getUser({ id: "1" });
+```
+
+`bind` returns a generated `BoundQueries` interface, so bound calls keep the same
+per-query doc comments (and `@deprecated` tags) as the standalone functions. Import
+it when you want to pass the bound queries around:
+
+```ts
+import { bind, type BoundQueries } from "./db/queries.ts";
+
+function makeUserService(queries: BoundQueries) {
+  /* ... */
+}
 ```
 
 ## Query annotations
