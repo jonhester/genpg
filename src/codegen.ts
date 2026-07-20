@@ -59,7 +59,7 @@ export function generateModule(analyzed: AnalyzedQuery[], ctx: CodegenContext): 
   if (converterConsts) blocks.push(converterConsts);
 
   blocks.push(...analyzed.map((a) => renderQuery(a, ctx)));
-  blocks.push(renderBind(analyzed));
+  blocks.push(renderBind(analyzed, ctx));
   return blocks.join("\n\n") + "\n";
 }
 
@@ -129,7 +129,8 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     const fields = params
       .map((p) => `  ${propName(tsFieldName(p.name, ctx))}: ${paramTsType(p, a.shape, ctx)};`)
       .join("\n");
-    out.push(`/** Parameters for \`${camel}\`. */\nexport interface ${argsType} {\n${fields}\n}`);
+    const doc = renderChildDoc(`Parameters for \`${camel}\`.`, a);
+    out.push(`${doc}\nexport interface ${argsType} {\n${fields}\n}`);
   }
 
   let rowType = "";
@@ -140,9 +141,8 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     const fields = cols
       .map((c, idx) => `  ${propName(tsFieldName(c.name, ctx))}: ${columnType(c, idx, a, ctx)};`)
       .join("\n");
-    out.push(
-      `/** Result row returned by \`${camel}\`. */\nexport interface ${rowType} {\n${fields || ""}\n}`,
-    );
+    const doc = renderChildDoc(`Result row returned by \`${camel}\`.`, a);
+    out.push(`${doc}\nexport interface ${rowType} {\n${fields || ""}\n}`);
 
     const built = renderHydrator(pascal, rowType, cols, ctx);
     if (built) {
@@ -158,11 +158,13 @@ function renderQuery(a: AnalyzedQuery, ctx: CodegenContext): string {
     ? renderDynamicBody(a, ctx, returnLine)
     : renderStaticBody(a, ctx, sqlConst, returnLine);
 
-  out.push(`${renderFunctionDoc(a)}\nexport async function ${camel}(${sig}): ${ret} {\n${body}\n}`);
+  out.push(
+    `${renderFunctionDoc(a, ctx)}\nexport async function ${camel}(${sig}): ${ret} {\n${body}\n}`,
+  );
   return out.join("\n\n");
 }
 
-function renderFunctionDoc(a: AnalyzedQuery): string {
+function renderFunctionDoc(a: AnalyzedQuery, ctx: CodegenContext, indent = ""): string {
   const lines = [];
   if (a.query.docs?.length) {
     lines.push(...a.query.docs, "");
@@ -171,33 +173,75 @@ function renderFunctionDoc(a: AnalyzedQuery): string {
     `Generated from \`${a.query.name} :${a.query.command}\`.`,
     "",
     "```sql",
-    ...a.query.sql.split(/\r?\n/),
+    ...renderDocSql(a, ctx).split(/\r?\n/),
     "```",
   );
   if (a.query.deprecated) {
     lines.push("", `@deprecated ${a.query.deprecated}`);
   }
-  return renderDocComment(lines);
+  return renderDocComment(lines, indent);
 }
 
-function renderDocComment(lines: string[]): string {
-  return ["/**", ...lines.map((line) => ` * ${escapeDocComment(line)}`), " */"].join("\n");
+/**
+ * The query as shown in hover docs, with each `@name` param rendered as a
+ * `${name}` template slot.
+ *
+ * Two reasons for the slot form: TypeScript parses a whitespace-preceded `@` in a
+ * doc comment as a JSDoc tag even inside a fenced code block, which truncates the
+ * SQL at the first param; and the slot names use the generated field names, so
+ * they match what the caller actually passes under `caseStyle: "camel"`.
+ *
+ * Built from the rewritten segments rather than the raw SQL so that `@` inside
+ * string literals, comments, and dollar-quoted blocks is left alone.
+ */
+function renderDocSql(a: AnalyzedQuery, ctx: CodegenContext): string {
+  return a.rewritten.segments
+    .map((segment) => {
+      if (typeof segment === "string") return segment;
+      const param = a.rewritten.params[segment.param];
+      return param ? `\${${tsFieldName(param.name, ctx)}}` : "";
+    })
+    .join("");
+}
+
+/** Doc for a query's generated `Args`/`Row` type, carrying any deprecation across. */
+function renderChildDoc(summary: string, a: AnalyzedQuery): string {
+  if (!a.query.deprecated) return `/** ${summary} */`;
+  return renderDocComment([summary, "", `@deprecated ${a.query.deprecated}`]);
+}
+
+function renderDocComment(lines: string[], indent = ""): string {
+  return ["/**", ...lines.map((line) => ` * ${escapeDocComment(line)}`), " */"]
+    .map((line) => `${indent}${line}`)
+    .join("\n");
 }
 
 function escapeDocComment(line: string): string {
   return line.replace(/\*\//g, "*\\/");
 }
 
-function renderBind(analyzed: AnalyzedQuery[]): string {
-  const entries = analyzed.map((a) => {
+function renderBind(analyzed: AnalyzedQuery[], ctx: CodegenContext): string {
+  const members: string[] = [];
+  const entries: string[] = [];
+
+  for (const a of analyzed) {
+    const pascal = pascalCase(a.query.name);
     const camel = camelCase(a.query.name);
-    const argsType = a.rewritten.params.length > 0 ? `${pascalCase(a.query.name)}Args` : null;
+    const argsType = a.rewritten.params.length > 0 ? `${pascal}Args` : null;
+    const wantsRows = a.query.command === "one" || a.query.command === "many";
+    const ret = returnType(a.query.command, wantsRows ? `${pascal}Row` : "");
+
     const sig = argsType ? `(args: ${argsType})` : `()`;
     const call = argsType ? `${camel}(db, args)` : `${camel}(db)`;
-    return `    ${camel}: ${sig} => ${call},`;
-  });
 
-  return `export function bind(db: Queryable) {\n  return {\n${entries.join("\n")}\n  };\n}`;
+    members.push(`${renderFunctionDoc(a, ctx, "  ")}\n  ${camel}${sig}: ${ret};`);
+    entries.push(`    ${camel}: ${sig} => ${call},`);
+  }
+
+  return [
+    `/** Every query bound to a single {@link Queryable}. */\nexport interface BoundQueries {\n${members.join("\n")}\n}`,
+    `/** Bind every query to \`db\` so call sites don't have to pass it. */\nexport function bind(db: Queryable): BoundQueries {\n  return {\n${entries.join("\n")}\n  };\n}`,
+  ].join("\n\n");
 }
 
 function returnType(command: AnalyzedQuery["query"]["command"], rowType: string): string {
@@ -532,6 +576,7 @@ function escapeTemplate(sql: string): string {
 
 function validateGeneratedNames(analyzed: AnalyzedQuery[]): void {
   const used = new Map<string, string>();
+  for (const name of MODULE_IDENTIFIERS) used.set(name, "a genpg module-level declaration");
 
   for (const a of analyzed) {
     const source = `query "${a.query.name}"`;
@@ -557,6 +602,9 @@ function validateGeneratedNames(analyzed: AnalyzedQuery[]): void {
     }
   }
 }
+
+/** Names genpg always emits at module scope; queries may not shadow them. */
+const MODULE_IDENTIFIERS = ["QueryResultLike", "Queryable", "BoundQueries", "bind"];
 
 function assertTsIdentifier(identifier: string, label: string): void {
   if (!/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(identifier) || RESERVED_TS_WORDS.has(identifier)) {

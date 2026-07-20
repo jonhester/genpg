@@ -3,15 +3,29 @@ import { generateModule } from "../src/codegen.ts";
 import { emptyTypeInfo } from "../src/typemap.ts";
 import { attrKey } from "../src/typemap.ts";
 import type { AnalyzedQuery } from "../src/model.ts";
-import type { QueryParam, RewrittenQuery } from "../src/params.ts";
+import type { QueryParam, RewrittenQuery, SqlSegment } from "../src/params.ts";
 
 function scalarParam(name: string, placeholder: number, nullable = false): QueryParam {
   return { name, kind: "scalar", nullable, placeholders: [placeholder] };
 }
 
-/** A static (scalar-only) RewrittenQuery; codegen reads introspectText + params. */
+/**
+ * A static (scalar-only) RewrittenQuery. Segments are split back out of
+ * `introspectText` so they interleave literals with param references the way the
+ * real rewriter does — doc rendering reads them.
+ */
 function staticRewritten(introspectText: string, params: QueryParam[]): RewrittenQuery {
-  return { segments: [introspectText], params, introspectText, dynamic: false };
+  const segments: SqlSegment[] = [];
+  let last = 0;
+  for (const match of introspectText.matchAll(/\$(\d+)/g)) {
+    const param = params.findIndex((p) => p.placeholders.includes(Number(match[1])));
+    if (param === -1) continue;
+    if (match.index > last) segments.push(introspectText.slice(last, match.index));
+    segments.push({ param });
+    last = match.index + match[0].length;
+  }
+  if (last < introspectText.length) segments.push(introspectText.slice(last));
+  return { segments, params, introspectText, dynamic: false };
 }
 
 function ctx() {
@@ -51,13 +65,15 @@ test("generates a :one function with args and a row interface", () => {
       " * Generated from `GetUser :one`.",
       " * ",
       " * ```sql",
-      " * SELECT id, nickname FROM users WHERE id = @id",
+      " * SELECT id, nickname FROM users WHERE id = ${id}",
       " * ```",
       " */",
       "export async function getUser",
     ].join("\n"),
   );
   expect(code).not.toContain("SELECT id, nickname FROM users WHERE id = $1\n * ```");
+  // A bare `@` would be parsed as a JSDoc tag and truncate the SQL on hover.
+  expect(code).not.toContain("WHERE id = @id");
   expect(code).toContain("export interface GetUserArgs {\n  id: number;\n}");
   expect(code).toContain("export interface GetUserRow {");
   expect(code).toContain("id: number;"); // NOT NULL -> no | null
@@ -66,8 +82,21 @@ test("generates a :one function with args and a row interface", () => {
     "export async function getUser(db: Queryable, args: GetUserArgs): Promise<GetUserRow | null>",
   );
   expect(code).toContain("await db.query(getUserSql, [args.id])");
-  expect(code).toContain("export function bind(db: Queryable)");
+  expect(code).toContain("export function bind(db: Queryable): BoundQueries");
   expect(code).toContain("getUser: (args: GetUserArgs) => getUser(db, args)");
+  // BoundQueries carries the per-query docs so hovering a bound call site shows them.
+  expect(code).toContain(
+    [
+      "  /**",
+      "   * Generated from `GetUser :one`.",
+      "   * ",
+      "   * ```sql",
+      "   * SELECT id, nickname FROM users WHERE id = ${id}",
+      "   * ```",
+      "   */",
+      "  getUser(args: GetUserArgs): Promise<GetUserRow | null>;",
+    ].join("\n"),
+  );
   expect(code).toContain("interface Queryable"); // inlined runtime
 });
 
@@ -354,8 +383,15 @@ test("rejects invalid or colliding generated query identifiers", () => {
     shape: validShape,
   };
 
+  const shadowsBind: AnalyzedQuery = {
+    query: { name: "bind", command: "many", sql: "SELECT id FROM users" },
+    rewritten: staticRewritten("SELECT id FROM users", []),
+    shape: validShape,
+  };
+
   expect(() => generateModule([first, second], ctx())).toThrow(/collides/);
   expect(() => generateModule([invalid], ctx())).toThrow(/valid TypeScript identifier/);
+  expect(() => generateModule([shadowsBind], ctx())).toThrow(/collides/);
 });
 
 test("escapes generated query documentation comments", () => {
@@ -418,4 +454,34 @@ test("emits SQL docs and deprecation reason in generated function JSDoc", () => 
       "export async function oldList",
     ].join("\n"),
   );
+});
+
+test("propagates a query's deprecation to its generated Args and Row types", () => {
+  const analyzed: AnalyzedQuery[] = [
+    {
+      query: {
+        name: "OldGet",
+        command: "one",
+        deprecated: "Use NewGet instead.",
+        sql: "SELECT id FROM rows WHERE id = @id",
+      },
+      rewritten: staticRewritten("SELECT id FROM rows WHERE id = $1", [
+        { name: "id", kind: "scalar", nullable: false, placeholders: [1] },
+      ]),
+      shape: {
+        params: [23],
+        columns: [{ name: "id", tableOid: 100, columnAttr: 1, typeOid: 23 }],
+      },
+    },
+  ];
+
+  const code = generateModule(analyzed, ctx());
+  for (const [summary, decl] of [
+    ["Parameters for `oldGet`.", "export interface OldGetArgs"],
+    ["Result row returned by `oldGet`.", "export interface OldGetRow"],
+  ]) {
+    expect(code).toContain(
+      ["/**", ` * ${summary}`, " * ", " * @deprecated Use NewGet instead.", " */", decl].join("\n"),
+    );
+  }
 });
